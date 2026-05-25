@@ -31,8 +31,13 @@ jobs:
       - name: Vet
         run: go vet ./...
 
-      - name: Test with race detector
+      - name: Test (Linux/macOS with coverage)
+        if: runner.os != 'Windows'
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Test (Windows)
+        if: runner.os == 'Windows'
+        run: go test -race ./...
 
       - name: Upload coverage to Codecov
         if: matrix.os == 'ubuntu-latest'
