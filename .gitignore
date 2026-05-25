@@ -16,6 +16,12 @@ coverage.html
 dist/
 bin/
 
+# Example compiled binaries (no extension on Unix)
+examples/*/[^.]*
+!examples/*/*.go
+!examples/*/go.mod
+!examples/*/go.sum
+
 # Go vendor
 vendor/
 
