@@ -1,0 +1,8 @@
+# Default owner for everything not matched below.
+* @ihsanarifr
+
+# Security-sensitive packages — require Lead Maintainer + 1 additional reviewer.
+/cryptox/ @ihsanarifr
+/hashx/ @ihsanarifr
+/apikey/ @ihsanarifr
+/jwtx/ @ihsanarifr

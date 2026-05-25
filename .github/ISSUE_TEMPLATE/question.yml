@@ -1,0 +1,23 @@
+name: Question
+description: Ask a question about the SDK
+labels: ["question"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before asking, please check:
+        - [Documentation](https://pkg.go.dev/github.com/santekno/sdk)
+        - [Existing issues](https://github.com/santekno/sdk/issues)
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Your Question
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What are you trying to achieve? Include relevant code if helpful.

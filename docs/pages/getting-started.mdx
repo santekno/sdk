@@ -1,0 +1,68 @@
+# Getting Started
+
+## Prerequisites
+
+- Go ≥ 1.25
+- No CGo required
+
+## Install
+
+```bash
+go get github.com/santekno/sdk
+```
+
+Or install only the packages you need:
+
+```bash
+go get github.com/santekno/sdk/httpx
+go get github.com/santekno/sdk/logx
+go get github.com/santekno/sdk/timex
+```
+
+## 60-Second Example
+
+```go
+package main
+
+import (
+    "context"
+    "log"
+    "time"
+
+    "github.com/santekno/sdk/httpx"
+    "github.com/santekno/sdk/logx"
+    "github.com/santekno/sdk/timex"
+    "github.com/santekno/sdk/validx"
+)
+
+func main() {
+    // Structured logger
+    logger := logx.New(logx.WithLevel("info"))
+
+    // Resilient HTTP client with retries + circuit breaker
+    client := httpx.New(
+        httpx.WithTimeout(5*time.Second),
+        httpx.WithRetries(3),
+        httpx.WithLogger(logger),
+    )
+
+    var result map[string]any
+    if err := client.GetJSON(context.Background(), "https://api.example.com/health", &result); err != nil {
+        log.Fatal(err)
+    }
+
+    // Indonesian date formatting
+    now := time.Now().In(timex.Jakarta)
+    logger.Info("date", "formatted", timex.FormatID(now, timex.LongID))
+
+    // NIK parsing
+    info, _ := validx.ParseNIK("3201010101800001")
+    logger.Info("nik", "province", info.Province, "gender", info.Gender)
+}
+```
+
+## Next Steps
+
+- [httpx — Resilient HTTP Client](/packages/httpx)
+- [timex — Indonesian Date & Time](/packages/timex)
+- [validx — Indonesian Validation](/packages/validx)

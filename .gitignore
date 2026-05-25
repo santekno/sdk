@@ -1,0 +1,54 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Test coverage
+coverage.out
+coverage.html
+*.coverprofile
+
+# Build artifacts
+dist/
+bin/
+
+# Go vendor
+vendor/
+
+# Go workspace (local dev only)
+go.work
+go.work.sum
+
+# Environment files
+.env
+.env.*
+!.env.example
+
+# IDE / editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tools output
+bench.txt
+cpu.prof
+mem.prof
+
+# Docs site build
+docs/.next/
+docs/node_modules/
+docs/out/
+specs/
+
+.claude/
+.specify/
