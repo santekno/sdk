@@ -1,0 +1,56 @@
+# validx — Indonesian Validation
+
+## Install
+
+```bash
+go get github.com/santekno/sdk/validx
+```
+
+## Quickstart
+
+```go
+// Struct validation with Indonesian tags
+type CitizenForm struct {
+    NIK   string `validate:"required,nik"`
+    NPWP  string `validate:"omitempty,npwp"`
+    Phone string `validate:"required,id_phone"`
+}
+
+v := validx.New()
+if err := v.Struct(form); err != nil {
+    // field-level errors
+}
+
+// Parse NIK
+info, err := validx.ParseNIK("3201010101800001")
+fmt.Println(info.Province) // "Jawa Barat"
+
+// Format IDR
+fmt.Println(validx.FormatIDR(1_500_000)) // "Rp1.500.000"
+```
+
+## Validation Tags
+
+| Tag | Validates |
+|-----|-----------|
+| `nik` | 16-digit NIK (structural check) |
+| `npwp` | 15-digit NPWP |
+| `id_phone` | Indonesian mobile/landline (08xx, +628xx, 021xxx) |
+| `id_postal` | 5-digit postal code (first digit 1–9) |
+
+## NIKInfo Fields
+
+| Field | Description |
+|-------|-------------|
+| `ProvinceCode` | 2-digit BPS province code |
+| `Province` | Province name (Bahasa Indonesia) |
+| `BirthDate` | Decoded birth date |
+| `Gender` | `"M"` or `"F"` |
+| `SerialNumber` | 4-digit serial |
+
+## IDR Formatting
+
+```go
+validx.FormatIDR(1_500_000)                        // "Rp1.500.000"
+validx.FormatIDR(1_500_000, validx.WithDecimal(true)) // "Rp1.500.000,00"
+```

@@ -1,0 +1,62 @@
+# logx — Structured Logging
+
+## Install
+
+```bash
+go get github.com/santekno/sdk/logx
+```
+
+## Quickstart
+
+```go
+l := logx.New(
+    logx.WithLevel("info"),
+    logx.WithFormat("json"),
+)
+
+l.Info("request completed",
+    "method", "GET",
+    "path", "/health",
+    "status", 200,
+    "duration_ms", 12,
+)
+
+// Attach fields permanently
+service := l.With("service", "api", "version", "1.0")
+service.Info("server starting", "port", 8080)
+```
+
+## Logger Interface
+
+```go
+type Logger interface {
+    Debug(msg string, kv ...any)
+    Info(msg string, kv ...any)
+    Warn(msg string, kv ...any)
+    Error(msg string, kv ...any)
+    With(kv ...any) Logger
+    WithContext(ctx context.Context) Logger
+    Slog() *slog.Logger
+}
+```
+
+## Options
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `WithLevel(l)` | `"info"` | Minimum log level |
+| `WithFormat(f)` | `"json"` | `"json"` or `"console"` |
+| `WithOutput(w)` | `os.Stdout` | Output writer |
+| `WithFields(kv...)` | — | Initial key-value pairs |
+| `WithCaller(b)` | `false` | Include file:line |
+
+## Context Integration
+
+```go
+ctx := logx.WithContext(ctx, l)
+l2 := logx.FromContext(ctx)  // retrieves the logger
+```
+
+## Performance
+
+`logx.Info` with 10 fields: ≤ 200 ns.

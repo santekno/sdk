@@ -1,0 +1,34 @@
+version: 2
+
+# Library release — no binaries to build.
+builds:
+  - skip: true
+
+source:
+  enabled: true
+
+changelog:
+  use: conventional-commits
+  sort: asc
+  filters:
+    exclude:
+      - "^chore(deps)"
+      - "^ci:"
+      - "^test:"
+
+release:
+  github:
+    owner: santekno
+    name: sdk
+  prerelease: auto
+  name_template: "{{.Tag}}"
+
+signs:
+  - artifacts: checksum
+    args:
+      - "--batch"
+      - "--local-user={{ .Env.GPG_FINGERPRINT }}"
+      - "--output"
+      - "${signature}"
+      - "--detach-sign"
+      - "${artifact}"

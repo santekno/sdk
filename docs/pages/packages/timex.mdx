@@ -1,0 +1,52 @@
+# timex — Indonesian Date & Time
+
+## Install
+
+```bash
+go get github.com/santekno/sdk/timex
+```
+
+## Quickstart
+
+```go
+import "github.com/santekno/sdk/timex"
+
+t := time.Now().In(timex.Jakarta)
+fmt.Println(timex.FormatID(t, timex.LongID))
+// "Sabtu, 17 Mei 2026"
+
+days := timex.BusinessDaysBetween(start, end)
+```
+
+## Timezones
+
+| Variable | UTC Offset | Region |
+|----------|-----------|--------|
+| `timex.Jakarta` | +7 (WIB) | Java, Sumatra, West Kalimantan |
+| `timex.Makassar` | +8 (WITA) | Sulawesi, Bali, East Kalimantan |
+| `timex.Jayapura` | +9 (WIT) | Papua, Maluku |
+
+## Layout Constants
+
+| Constant | Format | Example |
+|----------|--------|---------|
+| `LongID` | `"Senin, 2 Januari 2006"` | Sabtu, 17 Mei 2026 |
+| `ShortID` | `"2/1/06"` | 17/5/26 |
+| `DateID` | `"02-01-2006"` | 17-05-2026 |
+| `DateTimeID` | `"02-01-2006 15:04"` | 17-05-2026 14:30 |
+| `TimeID` | `"15:04:05"` | 14:30:00 |
+
+## Functions
+
+- `FormatID(t time.Time, layout string) string`
+- `ParseID(layout, value string) (time.Time, error)`
+- `BusinessDaysBetween(from, to time.Time) int`
+- `AddBusinessDays(t time.Time, n int) time.Time`
+- `IsBusinessDay(t time.Time) bool`
+- `IsIndonesianHoliday(t time.Time) bool`
+- `IndonesianHolidays(year int) []Holiday`
+- `Age(birthDate time.Time) int`
+
+## Holiday Registry
+
+Includes official Indonesian public holidays for 2024–2027.

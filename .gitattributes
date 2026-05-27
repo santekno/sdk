@@ -1,0 +1,31 @@
+# Enforce LF line endings for all text files.
+* text=auto eol=lf
+
+# Go source files — always LF
+*.go text eol=lf
+
+# Markdown
+*.md text eol=lf
+
+# YAML / JSON / TOML
+*.yml text eol=lf
+*.yaml text eol=lf
+*.json text eol=lf
+*.toml text eol=lf
+
+# Shell scripts
+*.sh text eol=lf
+
+# Windows scripts — CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Generated files — mark as binary so diff is suppressed
+go.sum binary
+*.pb.go linguist-generated=true
+
+# Binaries
+*.exe binary
+*.dll binary
+*.so binary
+*.dylib binary
