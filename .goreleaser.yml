@@ -8,7 +8,7 @@ source:
   enabled: true
 
 changelog:
-  use: conventional-commits
+  use: git
   sort: asc
   filters:
     exclude:

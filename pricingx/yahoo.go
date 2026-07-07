@@ -58,28 +58,38 @@ type yahooResp struct {
 
 // GetPrice implements Provider using /v8/finance/chart/<symbol>.
 func (y *Yahoo) GetPrice(ctx context.Context, instrumentCode string) (Price, error) {
-	url := fmt.Sprintf("%s/v8/finance/chart/%s", y.baseURL, instrumentCode)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	val, err := fetchYahooChart(ctx, y.hc, y.baseURL, instrumentCode)
 	if err != nil {
 		return Price{}, err
 	}
-	res, err := y.hc.Do(req)
+	return Price{Value: val, AsOf: time.Now(), Source: "yahoo"}, nil
+}
+
+// fetchYahooChart fetches the regularMarketPrice for a symbol from Yahoo Finance.
+// Shared by Yahoo and YahooGold.
+func fetchYahooChart(ctx context.Context, hc *http.Client, baseURL, symbol string) (moneyx.Dec, error) {
+	url := fmt.Sprintf("%s/v8/finance/chart/%s", baseURL, symbol)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return Price{}, err
+		return moneyx.Zero(), err
+	}
+	res, err := hc.Do(req)
+	if err != nil {
+		return moneyx.Zero(), err
 	}
 	defer res.Body.Close()
 
 	var body yahooResp
 	if err := json.NewDecoder(res.Body).Decode(&body); err != nil {
-		return Price{}, fmt.Errorf("pricingx: decode yahoo: %w", err)
+		return moneyx.Zero(), fmt.Errorf("pricingx: decode yahoo: %w", err)
 	}
 	if len(body.Chart.Result) == 0 {
-		return Price{}, fmt.Errorf("pricingx: yahoo: no result for %q", instrumentCode)
+		return moneyx.Zero(), fmt.Errorf("pricingx: yahoo: no result for %q", symbol)
 	}
 	raw := body.Chart.Result[0].Meta.RegularMarketPrice.String()
 	val, err := moneyx.Parse(raw)
 	if err != nil {
-		return Price{}, fmt.Errorf("pricingx: yahoo: invalid price %q for %q", raw, instrumentCode)
+		return moneyx.Zero(), fmt.Errorf("pricingx: yahoo: invalid price %q for %q", raw, symbol)
 	}
-	return Price{Value: val, AsOf: time.Now(), Source: "yahoo"}, nil
+	return val, nil
 }
