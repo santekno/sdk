@@ -52,8 +52,8 @@ func TestLocalStorage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get %s: %v", path, err)
 	}
-	defer r.Close()
 	b, _ := io.ReadAll(r)
+	r.Close() // close before Delete — Windows holds a lock until the handle is released
 	if string(b) != "x,y,z" {
 		t.Errorf("got %q, want %q", string(b), "x,y,z")
 	}
