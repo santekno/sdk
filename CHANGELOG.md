@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `middleware/chi`: net/http middleware for chi routers (RequestID, Logger, Recovery, Tracing, JWTAuth with ClaimsFromContext) and a pluggable JSON ErrorWriter; part of the root module, so it is versioned with every sdk tag
 - `httpx`: Resilient HTTP client with retry, circuit breaker, configurable timeouts
 - `logx`: Structured logger interface backed by `log/slog`
 - `tracex`: OTel-compatible tracer interface with no-op implementation
