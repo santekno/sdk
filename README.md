@@ -90,6 +90,7 @@ func main() {
 | `ptrx` | Generic pointer helpers (Of, Deref) |
 | `convx` | Type conversion helpers |
 | `apikey` | API key generation and verification |
+| `middleware/chi` | net/http middleware for chi: request ID, logging, panic recovery, tracing, JWT auth |
 
 ## Contributing
 

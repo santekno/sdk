@@ -3,6 +3,7 @@ module github.com/santekno/sdk
 go 1.25.10
 
 require (
+	github.com/go-chi/chi/v5 v5.5.0
 	github.com/go-playground/validator/v10 v10.30.3
 	github.com/golangci/golangci-lint v1.64.8
 	golang.org/x/crypto v0.53.0

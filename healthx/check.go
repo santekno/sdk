@@ -22,6 +22,10 @@ type Handler struct {
 	Readiness []NamedCheck
 	// Timeout bounds the per-check execution time. Defaults to 2s if zero.
 	Timeout time.Duration
+	// HideErrors omits each failing check's error text from the response, so a
+	// public probe does not leak internal addresses or driver messages. Log the
+	// errors instead when this is set.
+	HideErrors bool
 }
 
 // AlwaysOK returns a Check that always succeeds.
@@ -45,7 +49,7 @@ func PingHTTP(url string) Check {
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer func() { _ = resp.Body.Close() }()
 		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			return errors.New("healthx: ping " + url + " returned non-2xx")
 		}
