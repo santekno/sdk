@@ -359,3 +359,31 @@ func TestTracingNilTracer(t *testing.T) {
 		t.Fatalf("status = %d, want 204", w.Code)
 	}
 }
+
+func TestDefaultErrorWriterDetails(t *testing.T) {
+	w := httptest.NewRecorder()
+	err := errx.New("VALIDATION_FAILED", "invalid request").
+		WithHTTPStatus(http.StatusUnprocessableEntity).
+		WithDetail("field", "email")
+	chimw.DefaultErrorWriter(w, httptest.NewRequest(http.MethodPost, "/", nil), err)
+
+	var body struct {
+		Error struct {
+			Code    string         `json:"code"`
+			Details map[string]any `json:"details"`
+		} `json:"error"`
+	}
+	if e := json.NewDecoder(w.Body).Decode(&body); e != nil {
+		t.Fatal(e)
+	}
+	if w.Code != http.StatusUnprocessableEntity || body.Error.Code != "VALIDATION_FAILED" || body.Error.Details["field"] != "email" {
+		t.Fatalf("status %d body %+v", w.Code, body)
+	}
+
+	// No details: the key is omitted entirely.
+	w = httptest.NewRecorder()
+	chimw.DefaultErrorWriter(w, httptest.NewRequest(http.MethodGet, "/", nil), errx.New("X", "y"))
+	if strings.Contains(w.Body.String(), "details") {
+		t.Fatalf("details present without any: %s", w.Body.String())
+	}
+}

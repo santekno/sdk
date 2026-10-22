@@ -41,12 +41,14 @@ type errorBody struct {
 }
 
 type errorPayload struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Code    string         `json:"code"`
+	Message string         `json:"message"`
+	Details map[string]any `json:"details,omitempty"`
 }
 
-// DefaultErrorWriter writes {"error":{"code":…,"message":…}} with the error's
-// HTTP status (500 when the error carries none).
+// DefaultErrorWriter writes {"error":{"code":…,"message":…,"details":{…}}} with
+// the error's HTTP status (500 when the error carries none). details is omitted
+// when the error has none.
 func DefaultErrorWriter(w http.ResponseWriter, _ *http.Request, err *errx.AppError) {
 	status := err.HTTPStatus
 	if status == 0 {
@@ -54,5 +56,5 @@ func DefaultErrorWriter(w http.ResponseWriter, _ *http.Request, err *errx.AppErr
 	}
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(errorBody{Error: errorPayload{Code: err.Code, Message: err.Message}})
+	_ = json.NewEncoder(w).Encode(errorBody{Error: errorPayload{Code: err.Code, Message: err.Message, Details: err.Details}})
 }
