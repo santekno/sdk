@@ -50,18 +50,23 @@ func (h *Handler) serve(w http.ResponseWriter, r *http.Request, checks []NamedCh
 
 		if err != nil {
 			overallOK = false
-			resp.Checks[c.Name] = checkResult{Status: "unavailable", Error: err.Error(), DurationMs: dur}
+			msg := err.Error()
+			if h.HideErrors {
+				msg = ""
+			}
+			resp.Checks[c.Name] = checkResult{Status: "unavailable", Error: msg, DurationMs: dur}
 		} else {
 			resp.Checks[c.Name] = checkResult{Status: "ok", DurationMs: dur}
 		}
 	}
 
+	// Headers must be set before WriteHeader, or they are silently dropped.
+	w.Header().Set("Content-Type", "application/json")
 	if !overallOK {
 		resp.Status = "unavailable"
 		w.WriteHeader(http.StatusServiceUnavailable)
 	} else {
 		w.WriteHeader(http.StatusOK)
 	}
-	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
 }
