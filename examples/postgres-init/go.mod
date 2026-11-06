@@ -1,6 +1,6 @@
 module github.com/santekno/sdk/examples/postgres-init
 
-go 1.25.10
+go 1.26.10
 
 require github.com/santekno/sdk v0.0.0
 

@@ -4,7 +4,7 @@ Thank you for your interest in contributing! This guide covers the full workflow
 
 ## Prerequisites
 
-- Go ≥ 1.25
+- Go ≥ 1.26.10
 - `golangci-lint` v2 (`go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest`)
 - `make`
 

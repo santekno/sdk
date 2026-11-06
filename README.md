@@ -1,7 +1,7 @@
 # Santekno Go SDK
 
 [![CI](https://github.com/santekno/sdk/actions/workflows/ci.yml/badge.svg)](https://github.com/santekno/sdk/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/badge/go-%3E%3D1.25-blue)](https://go.dev)
+[![Go Version](https://img.shields.io/badge/go-%3E%3D1.26.10-blue)](https://go.dev)
 [![Go Reference](https://pkg.go.dev/badge/github.com/santekno/sdk.svg)](https://pkg.go.dev/github.com/santekno/sdk)
 [![codecov](https://codecov.io/gh/santekno/sdk/branch/main/graph/badge.svg)](https://codecov.io/gh/santekno/sdk)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)

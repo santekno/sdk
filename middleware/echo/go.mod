@@ -1,6 +1,6 @@
 module github.com/santekno/sdk/middleware/echo
 
-go 1.25.10
+go 1.26.10
 
 require (
 	github.com/labstack/echo/v4 v4.13.4
