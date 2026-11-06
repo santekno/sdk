@@ -1,6 +1,6 @@
 module github.com/santekno/sdk/examples/jwt-auth-middleware-gin
 
-go 1.25.10
+go 1.26.10
 
 require (
 	github.com/gin-gonic/gin v1.12.0
