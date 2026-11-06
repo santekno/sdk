@@ -14,4 +14,8 @@
 //		jwtx.WithLeeway(30*time.Second), jwtx.WithContext(ctx))
 //
 // Callers must still check "iss" and "aud": VerifyWithKeySet does not.
+//
+// JWKSClient keeps using its keys while the issuer is unreachable, for at most
+// 24 hours after the last successful fetch (WithMaxStale). After that it returns
+// ErrKeySetUnavailable, which callers should report as a server-side failure.
 package jwtx

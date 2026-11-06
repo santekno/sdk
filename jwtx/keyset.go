@@ -29,7 +29,7 @@ const (
 // StaticKeySet and JWKSClient implement it.
 type KeySet interface {
 	// Lookup returns the key for kid. It returns ErrKeyNotFound when kid is
-	// unknown and ErrKeySetUnavailable when no key could be loaded at all.
+	// unknown and ErrKeySetUnavailable when no key can be served at all.
 	Lookup(ctx context.Context, kid string) (Key, error)
 }
 

@@ -20,6 +20,7 @@ const (
 	// jwksMinRefreshInterval limits fetches of every kind, so that tokens with
 	// random "kid" values cannot turn into outbound traffic.
 	jwksMinRefreshInterval = 30 * time.Second
+	jwksDefaultMaxStale    = 24 * time.Hour
 )
 
 // JWKSClient is a KeySet backed by a remote JWKS document. It is safe for
@@ -29,8 +30,12 @@ const (
 // when that is shorter. An expired or unknown "kid" triggers a refresh, but the
 // client fetches at most once per 30 seconds and concurrent callers share one
 // fetch. A successful refresh replaces the whole set, so a key the issuer
-// removed stops working at once. When a refresh fails the old keys stay in use,
-// with no upper bound on their age, until a refresh succeeds.
+// removed stops working at once.
+//
+// When a refresh fails the old keys stay in use, but only for 24 hours after
+// the start of the last successful fetch (see WithMaxStale). Past that limit
+// every Lookup returns ErrKeySetUnavailable until a refresh succeeds, so that
+// an attacker who blocks the JWKS endpoint cannot keep a revoked key alive.
 //
 // Each fetch is limited to 5 seconds and 64 KiB, and redirects are refused.
 type JWKSClient struct {
@@ -38,12 +43,14 @@ type JWKSClient struct {
 	http          *http.Client
 	allowLoopback bool
 	timeout       time.Duration
+	maxStale      time.Duration
 	now           func() time.Time
 
 	mu          sync.Mutex
 	keys        *StaticKeySet // nil until the first successful fetch
 	expires     time.Time
 	lastAttempt time.Time
+	lastSuccess time.Time // start of the last successful fetch
 	lastErr     error
 	inflight    chan struct{} // non-nil while a fetch runs, closed when it ends
 }
@@ -69,20 +76,34 @@ func WithInsecureLoopback() JWKSOption {
 	return func(c *JWKSClient) { c.allowLoopback = true }
 }
 
+// WithMaxStale sets how long after the last successful fetch keys may still be
+// used while refreshes fail. The default is 24 hours, and a key exactly d old is
+// still accepted. NewJWKSClient rejects d <= 0, so the limit cannot be switched
+// off by accident. Below 30 seconds, the refresh limit leaves gaps in which even
+// a healthy issuer yields ErrKeySetUnavailable.
+func WithMaxStale(d time.Duration) JWKSOption {
+	return func(c *JWKSClient) { c.maxStale = d }
+}
+
 // NewJWKSClient returns a client for the JWKS document at rawURL. It returns
-// ErrJWKSURLInvalid unless rawURL is an absolute https URL without credentials.
+// ErrJWKSURLInvalid unless rawURL is an absolute https URL without credentials,
+// and ErrMaxStaleInvalid when WithMaxStale received a value that is not positive.
 func NewJWKSClient(rawURL string, opts ...JWKSOption) (*JWKSClient, error) {
 	c := &JWKSClient{
-		url:     rawURL,
-		http:    withoutRedirects(&http.Client{}),
-		timeout: jwksFetchTimeout,
-		now:     time.Now,
+		url:      rawURL,
+		http:     withoutRedirects(&http.Client{}),
+		timeout:  jwksFetchTimeout,
+		maxStale: jwksDefaultMaxStale,
+		now:      time.Now,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	if !c.acceptsURL(rawURL) {
 		return nil, ErrJWKSURLInvalid
+	}
+	if c.maxStale <= 0 {
+		return nil, ErrMaxStaleInvalid
 	}
 	return c, nil
 }
@@ -113,7 +134,7 @@ func withoutRedirects(hc *http.Client) *http.Client {
 
 // Lookup implements KeySet. A cached unexpired key is returned without
 // blocking. Otherwise Lookup may wait for a refresh until ctx ends, then falls
-// back to the key it already holds.
+// back to the key it already holds if that key is within the WithMaxStale limit.
 func (c *JWKSClient) Lookup(ctx context.Context, kid string) (Key, error) {
 	if key, ok := c.freshKey(kid); ok {
 		return key, nil
@@ -122,16 +143,29 @@ func (c *JWKSClient) Lookup(ctx context.Context, kid string) (Key, error) {
 
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.keys == nil || c.now().Sub(c.lastSuccess) > c.maxStale {
+		return Key{}, c.unavailable(waitErr)
+	}
 	if key, ok := c.keys.get(kid); ok {
 		return key, nil
 	}
 	if waitErr != nil {
-		return Key{}, fmt.Errorf("%w: %w", ErrKeySetUnavailable, waitErr)
-	}
-	if c.keys == nil {
-		return Key{}, fmt.Errorf("%w: %w", ErrKeySetUnavailable, c.lastErr)
+		return Key{}, c.unavailable(waitErr)
 	}
 	return Key{}, ErrKeyNotFound
+}
+
+// unavailable wraps the reason no key can be served. There is no reason to
+// report when the keys outlived a limit shorter than the refresh interval.
+func (c *JWKSClient) unavailable(waitErr error) error {
+	cause := waitErr
+	if cause == nil {
+		cause = c.lastErr
+	}
+	if cause == nil {
+		return ErrKeySetUnavailable
+	}
+	return fmt.Errorf("%w: %w", ErrKeySetUnavailable, cause)
 }
 
 func (c *JWKSClient) freshKey(kid string) (Key, bool) {
@@ -181,7 +215,9 @@ func (c *JWKSClient) runFetch(ctx context.Context, done chan struct{}, started t
 	c.lastErr = err
 	if err == nil {
 		c.keys = keys
-		c.expires = started.Add(ttl)
+		c.lastSuccess = started
+		// A cached key must not outlive the limit Lookup enforces.
+		c.expires = started.Add(min(ttl, c.maxStale))
 	}
 }
 

@@ -444,6 +444,286 @@ func TestJWKSClient_NoKeysEverLoaded(t *testing.T) {
 	mustLookup(t, c, testKID)
 }
 
+func TestNewJWKSClient_MaxStale(t *testing.T) {
+	const url = "https://issuer.test/jwks"
+	tests := []struct {
+		name     string
+		maxStale time.Duration
+		want     error
+	}{
+		{"zero", 0, jwtx.ErrMaxStaleInvalid},
+		{"negative", -time.Nanosecond, jwtx.ErrMaxStaleInvalid},
+		{"large negative", -24 * time.Hour, jwtx.ErrMaxStaleInvalid},
+		{"smallest positive", time.Nanosecond, nil},
+		{"longer than the default", 7 * 24 * time.Hour, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, err := jwtx.NewJWKSClient(url, jwtx.WithMaxStale(tt.maxStale))
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("got %v, want %v", err, tt.want)
+			}
+			if (c == nil) != (tt.want != nil) {
+				t.Errorf("client = %v with error %v", c, err)
+			}
+		})
+	}
+}
+
+// newStaleClient returns a client whose keys loaded at the fake clock's start
+// and a server that fails every later request.
+func newStaleClient(t *testing.T, opts ...jwtx.JWKSOption) (*jwtx.JWKSClient, *fakeClock, *jwksServer, []byte) {
+	t.Helper()
+	doc := jwksDoc(t, ecJWK(t, &ecKey(t).PublicKey, testKID))
+	srv := newJWKSServer(t, doc)
+	c, err := jwtx.NewJWKSClient(srv.URL, append([]jwtx.JWKSOption{jwtx.WithHTTPClient(srv.Client())}, opts...)...)
+	if err != nil {
+		t.Fatalf("NewJWKSClient: %v", err)
+	}
+	clock := newFakeClock()
+	c.SetClock(clock.now)
+	mustLookup(t, c, testKID)
+	srv.fail(http.StatusServiceUnavailable)
+	return c, clock, srv, doc
+}
+
+func wantUnavailable(t *testing.T, c *jwtx.JWKSClient, kid string) {
+	t.Helper()
+	if _, err := c.Lookup(t.Context(), kid); !errors.Is(err, jwtx.ErrKeySetUnavailable) {
+		t.Fatalf("Lookup(%s): got %v, want ErrKeySetUnavailable", kid, err)
+	}
+}
+
+func TestJWKSClient_MaxStaleBoundary(t *testing.T) {
+	tests := []struct {
+		name  string
+		opts  []jwtx.JWKSOption
+		limit time.Duration
+	}{
+		{"default of 24 hours", nil, 24 * time.Hour},
+		{"explicit 24 hours", []jwtx.JWKSOption{jwtx.WithMaxStale(24 * time.Hour)}, 24 * time.Hour},
+		{"shorter limit", []jwtx.JWKSOption{jwtx.WithMaxStale(time.Hour)}, time.Hour},
+		{"longer limit", []jwtx.JWKSOption{jwtx.WithMaxStale(48 * time.Hour)}, 48 * time.Hour},
+		{"limit below the cache lifetime", []jwtx.JWKSOption{jwtx.WithMaxStale(2 * time.Minute)}, 2 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, clock, srv, _ := newStaleClient(t, tt.opts...)
+
+			clock.advance(tt.limit)
+			mustLookup(t, c, testKID) // exactly at the limit
+			hits := srv.hits.Load()
+
+			clock.advance(time.Nanosecond)
+			wantUnavailable(t, c, testKID)
+			wantUnavailable(t, c, "unknown-kid")
+			if got := srv.hits.Load(); got != hits {
+				t.Errorf("hits = %d, want %d: still inside the refresh window", got, hits)
+			}
+		})
+	}
+}
+
+func TestJWKSClient_MaxStaleErrorKeepsCause(t *testing.T) {
+	c, clock, _, _ := newStaleClient(t)
+	clock.advance(24*time.Hour + time.Second)
+
+	_, err := c.Lookup(t.Context(), "SECRET-KID")
+	if !errors.Is(err, jwtx.ErrKeySetUnavailable) || !errors.Is(err, jwtx.ErrJWKSInvalid) {
+		t.Fatalf("got %v", err)
+	}
+	if strings.Contains(err.Error(), "SECRET-KID") {
+		t.Errorf("error echoes the kid: %q", err)
+	}
+}
+
+// The age counts from the start of the fetch: the keys are as old as the
+// moment the issuer was asked, however slowly it answered.
+func TestJWKSClient_MaxStaleCountsFromFetchStart(t *testing.T) {
+	doc := jwksDoc(t, ecJWK(t, &ecKey(t).PublicKey, testKID))
+	srv := newJWKSServer(t, doc)
+	c, clock := newClient(t, srv)
+	srv.set(func(w http.ResponseWriter, _ *http.Request) {
+		clock.advance(time.Minute)
+		_, _ = w.Write(doc)
+	})
+	mustLookup(t, c, testKID)
+	srv.fail(http.StatusServiceUnavailable)
+
+	clock.advance(24*time.Hour - time.Minute)
+	mustLookup(t, c, testKID)
+	clock.advance(time.Nanosecond)
+	wantUnavailable(t, c, testKID)
+}
+
+func TestJWKSClient_TokensVerifyWhileRefreshFailsBelowLimit(t *testing.T) {
+	c, clock, srv, _ := newStaleClient(t)
+	tok := signES256(t, ecKey(t), es256Header(testKID), validClaims())
+
+	for hour := 1; hour <= 23; hour++ {
+		clock.advance(time.Hour)
+		claims, err := jwtx.VerifyWithKeySet(tok, c, allowAsymmetric, jwtx.WithContext(t.Context()))
+		if err != nil {
+			t.Fatalf("after %d hours: %v", hour, err)
+		}
+		if claims.Subject != "user-1" {
+			t.Errorf("Subject = %q", claims.Subject)
+		}
+	}
+	if got, want := srv.hits.Load(), int64(1+23); got != want {
+		t.Errorf("hits = %d, want %d: one failed refresh per hour", got, want)
+	}
+
+	clock.advance(time.Hour + time.Nanosecond)
+	if _, err := jwtx.VerifyWithKeySet(tok, c, allowAsymmetric); !errors.Is(err, jwtx.ErrKeySetUnavailable) {
+		t.Errorf("past the limit: got %v", err)
+	}
+}
+
+func TestJWKSClient_MaxStaleRecovery(t *testing.T) {
+	c, clock, srv, doc := newStaleClient(t)
+
+	clock.advance(24*time.Hour + time.Second)
+	wantUnavailable(t, c, testKID)
+
+	srv.serve(doc)
+	wantUnavailable(t, c, testKID) // recovery waits for the refresh window
+	clock.advance(30 * time.Second)
+	mustLookup(t, c, testKID)
+
+	// The limit restarts from the successful fetch.
+	recovered := srv.hits.Load()
+	srv.fail(http.StatusServiceUnavailable)
+	clock.advance(24 * time.Hour)
+	mustLookup(t, c, testKID)
+	clock.advance(time.Nanosecond)
+	wantUnavailable(t, c, testKID)
+	if got := srv.hits.Load(); got != recovered+1 {
+		t.Errorf("hits = %d, want %d", got, recovered+1)
+	}
+}
+
+// Failed attempts must not count as freshness, otherwise a blocked endpoint
+// would extend the life of the keys forever.
+func TestJWKSClient_FailedRefreshDoesNotRestartLimit(t *testing.T) {
+	c, clock, srv, _ := newStaleClient(t)
+
+	clock.advance(23*time.Hour + 59*time.Minute)
+	mustLookup(t, c, testKID)
+	hits := srv.hits.Load()
+
+	clock.advance(time.Minute + time.Nanosecond)
+	wantUnavailable(t, c, testKID)
+	if got := srv.hits.Load(); got != hits+1 {
+		t.Errorf("hits = %d, want a refresh attempt past the limit", got)
+	}
+}
+
+func TestJWKSClient_IdleClientRecoversOnFirstLookup(t *testing.T) {
+	c, clock, srv, doc := newStaleClient(t)
+	srv.serve(doc)
+
+	clock.advance(7 * 24 * time.Hour)
+	mustLookup(t, c, testKID)
+	if got := srv.hits.Load(); got != 2 {
+		t.Errorf("hits = %d, want 2", got)
+	}
+}
+
+// A limit below the cache lifetime must force a refresh when it is reached.
+// A healthy issuer then sees no gap in service.
+func TestJWKSClient_MaxStaleShortensCacheLifetime(t *testing.T) {
+	doc := jwksDoc(t, ecJWK(t, &ecKey(t).PublicKey, testKID))
+	srv := newJWKSServer(t, doc)
+	c, err := jwtx.NewJWKSClient(srv.URL, jwtx.WithHTTPClient(srv.Client()), jwtx.WithMaxStale(2*time.Minute))
+	if err != nil {
+		t.Fatalf("NewJWKSClient: %v", err)
+	}
+	clock := newFakeClock()
+	c.SetClock(clock.now)
+
+	mustLookup(t, c, testKID)
+	clock.advance(2*time.Minute - time.Second)
+	mustLookup(t, c, testKID)
+	if got := srv.hits.Load(); got != 1 {
+		t.Fatalf("before the limit: hits = %d, want 1", got)
+	}
+	clock.advance(time.Second)
+	mustLookup(t, c, testKID)
+	if got := srv.hits.Load(); got != 2 {
+		t.Fatalf("at the limit: hits = %d, want 2", got)
+	}
+}
+
+func TestJWKSClient_MaxStaleFloodIsRateLimited(t *testing.T) {
+	c, clock, srv, _ := newStaleClient(t)
+	clock.advance(24*time.Hour + time.Second)
+	wantUnavailable(t, c, testKID)
+	hits := srv.hits.Load()
+
+	var wg sync.WaitGroup
+	for g := range 8 {
+		wg.Go(func() {
+			for i := range 250 {
+				_, err := c.Lookup(t.Context(), fmt.Sprintf("kid-%d-%d", g, i))
+				if !errors.Is(err, jwtx.ErrKeySetUnavailable) {
+					t.Errorf("Lookup: got %v", err)
+				}
+			}
+		})
+	}
+	wg.Wait()
+	if got := srv.hits.Load(); got != hits {
+		t.Fatalf("hits = %d, want %d", got, hits)
+	}
+	clock.advance(30 * time.Second)
+	wantUnavailable(t, c, "another-kid")
+	if got := srv.hits.Load(); got != hits+1 {
+		t.Errorf("after 30s: hits = %d, want %d", got, hits+1)
+	}
+}
+
+func TestJWKSClient_MaxStaleWithCanceledCaller(t *testing.T) {
+	c, clock, srv, _ := newStaleClient(t)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	srv.set(func(http.ResponseWriter, *http.Request) { <-release })
+	clock.advance(24*time.Hour + time.Second)
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	_, err := c.Lookup(ctx, testKID)
+	if !errors.Is(err, jwtx.ErrKeySetUnavailable) || !errors.Is(err, context.Canceled) {
+		t.Errorf("got %v", err)
+	}
+}
+
+// With a limit below the refresh interval no fetch has failed, so there is no
+// cause to wrap. The error must still be well formed.
+func TestJWKSClient_MaxStaleBelowRefreshInterval(t *testing.T) {
+	doc := jwksDoc(t, ecJWK(t, &ecKey(t).PublicKey, testKID))
+	srv := newJWKSServer(t, doc)
+	c, err := jwtx.NewJWKSClient(srv.URL, jwtx.WithHTTPClient(srv.Client()), jwtx.WithMaxStale(10*time.Second))
+	if err != nil {
+		t.Fatalf("NewJWKSClient: %v", err)
+	}
+	clock := newFakeClock()
+	c.SetClock(clock.now)
+	mustLookup(t, c, testKID)
+
+	clock.advance(11 * time.Second)
+	_, err = c.Lookup(t.Context(), testKID)
+	if !errors.Is(err, jwtx.ErrKeySetUnavailable) {
+		t.Fatalf("got %v", err)
+	}
+	if strings.Contains(err.Error(), "%!") {
+		t.Errorf("malformed error: %q", err)
+	}
+	if got := srv.hits.Load(); got != 1 {
+		t.Errorf("hits = %d, want 1", got)
+	}
+}
+
 func TestJWKSClient_RefusesRedirects(t *testing.T) {
 	doc := jwksDoc(t, ecJWK(t, &ecKey(t).PublicKey, testKID))
 	var plainHits, tlsHits atomic.Int64

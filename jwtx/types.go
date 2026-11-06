@@ -37,14 +37,17 @@ var (
 	ErrKeyIDMissing = errors.New("jwtx: token has no key id")
 	// ErrKeyNotFound reports a "kid" the key set does not hold.
 	ErrKeyNotFound = errors.New("jwtx: key not found")
-	// ErrKeySetUnavailable reports that no key could be loaded at all. Unlike
-	// ErrKeyNotFound it says nothing about the token: callers should answer
-	// with a server-side failure rather than an authentication failure.
+	// ErrKeySetUnavailable reports that no key can be served: none was ever
+	// loaded, or refreshes have failed for longer than the WithMaxStale limit.
+	// Unlike ErrKeyNotFound it says nothing about the token: callers should
+	// answer with a server-side failure rather than an authentication failure.
 	ErrKeySetUnavailable = errors.New("jwtx: key set unavailable")
 	// ErrJWKSInvalid reports a JWKS document that cannot be used.
 	ErrJWKSInvalid = errors.New("jwtx: invalid JWKS")
 	// ErrJWKSURLInvalid reports a JWKS URL the client refuses to fetch.
 	ErrJWKSURLInvalid = errors.New("jwtx: JWKS URL must be https")
+	// ErrMaxStaleInvalid reports a WithMaxStale value that is not positive.
+	ErrMaxStaleInvalid = errors.New("jwtx: JWKS max stale must be positive")
 )
 
 // Claims is the JWT payload. Custom claims may be added via Extra.
