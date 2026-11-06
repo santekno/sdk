@@ -10,9 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - `healthx`: responses now carry `Content-Type: application/json`; the header was set after `WriteHeader` and dropped
+- `jwtx`: the `Verify` algorithm mismatch error no longer echoes the token's `alg` header
 
 ### Added
 
+- `jwtx`: ES256 verification (`ES256Verify`, JWS `r||s` signatures)
+- `jwtx`: `ParseKeySet` builds a `StaticKeySet` from a JWKS document (EC P-256 and RSA 2048 to 8192 bits); other keys are skipped
+- `jwtx`: `JWKSClient` fetches a JWKS over HTTPS (5 second timeout, 64 KiB limit, no redirects), caches it for 10 minutes or a shorter `max-age`, refreshes at most once per 30 seconds with a single in-flight fetch, and keeps the old keys when a refresh fails
+- `jwtx`: `VerifyWithKeySet` verifies third-party tokens against a `KeySet` with a required `kid`, a case-sensitive algorithm allow-list, an algorithm bound to the key, required `exp`, and `WithLeeway`/`WithContext` options
 - `middleware/chi`: net/http middleware for chi routers (RequestID, Logger, Recovery, Tracing, JWTAuth with ClaimsFromContext) and a pluggable JSON ErrorWriter; part of the root module, so it is versioned with every sdk tag
 - `uuidx.NewV7`: time-ordered UUID version 7 (RFC 9562)
 - `healthx.Handler.HideErrors`: omit check error text from public probe responses

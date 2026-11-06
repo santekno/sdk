@@ -2,6 +2,8 @@ package jwtx
 
 import (
 	"crypto"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/hmac"
 	"crypto/rsa"
 	"crypto/sha256"
@@ -10,6 +12,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"strings"
 	"time"
 )
@@ -40,7 +43,7 @@ func Verify(token string, key Key) (*Claims, error) {
 		return nil, ErrAlgorithmNone
 	}
 	if !strings.EqualFold(header.Alg, string(key.Alg)) {
-		return nil, fmt.Errorf("%w: header=%s, key=%s", ErrAlgorithmMismatch, header.Alg, key.Alg)
+		return nil, ErrAlgorithmMismatch
 	}
 
 	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
@@ -86,9 +89,32 @@ func verifyRaw(key Key, msg, sig []byte) error {
 			return ErrSignatureInvalid
 		}
 		return nil
+	case AlgES256:
+		return verifyES256(key.ECPub, msg, sig)
 	default:
 		return ErrUnsupportedAlgo
 	}
+}
+
+// es256SignatureSize is the JWS encoding of an ES256 signature: r and s as
+// fixed-width big-endian integers (RFC 7518 section 3.4). ASN.1 DER is invalid.
+const es256SignatureSize = 64
+
+func verifyES256(pub *ecdsa.PublicKey, msg, sig []byte) error {
+	// crypto/ecdsa dereferences all three fields of the key.
+	if pub == nil || pub.Curve != elliptic.P256() || pub.X == nil || pub.Y == nil {
+		return fmt.Errorf("%w: ES256 verify requires a P-256 public key", ErrTokenInvalid)
+	}
+	if len(sig) != es256SignatureSize {
+		return ErrSignatureInvalid
+	}
+	h := sha256.Sum256(msg)
+	r := new(big.Int).SetBytes(sig[:es256SignatureSize/2])
+	s := new(big.Int).SetBytes(sig[es256SignatureSize/2:])
+	if !ecdsa.Verify(pub, h[:], r, s) {
+		return ErrSignatureInvalid
+	}
+	return nil
 }
 
 func parseClaims(payload []byte) (*Claims, error) {
@@ -96,7 +122,19 @@ func parseClaims(payload []byte) (*Claims, error) {
 	if err := json.Unmarshal(payload, &raw); err != nil {
 		return nil, ErrTokenMalformed
 	}
+	c := claimsFromMap(raw)
 
+	now := nowFunc()
+	if !c.ExpiresAt.IsZero() && now.After(c.ExpiresAt) {
+		return nil, ErrTokenExpired
+	}
+	if !c.NotBefore.IsZero() && now.Before(c.NotBefore) {
+		return nil, ErrTokenInvalid
+	}
+	return c, nil
+}
+
+func claimsFromMap(raw map[string]any) *Claims {
 	c := &Claims{Extra: make(map[string]any)}
 	for k, v := range raw {
 		switch k {
@@ -107,16 +145,7 @@ func parseClaims(payload []byte) (*Claims, error) {
 		case "jti":
 			c.ID, _ = v.(string)
 		case "aud":
-			switch a := v.(type) {
-			case string:
-				c.Audience = []string{a}
-			case []any:
-				for _, x := range a {
-					if s, ok := x.(string); ok {
-						c.Audience = append(c.Audience, s)
-					}
-				}
-			}
+			c.Audience = audienceFrom(v)
 		case "exp":
 			if f, ok := v.(float64); ok {
 				c.ExpiresAt = time.Unix(int64(f), 0)
@@ -133,13 +162,22 @@ func parseClaims(payload []byte) (*Claims, error) {
 			c.Extra[k] = v
 		}
 	}
+	return c
+}
 
-	now := nowFunc()
-	if !c.ExpiresAt.IsZero() && now.After(c.ExpiresAt) {
-		return nil, ErrTokenExpired
+func audienceFrom(v any) []string {
+	switch a := v.(type) {
+	case string:
+		return []string{a}
+	case []any:
+		var aud []string
+		for _, x := range a {
+			if s, ok := x.(string); ok {
+				aud = append(aud, s)
+			}
+		}
+		return aud
+	default:
+		return nil
 	}
-	if !c.NotBefore.IsZero() && now.Before(c.NotBefore) {
-		return nil, ErrTokenInvalid
-	}
-	return c, nil
 }
