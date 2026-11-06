@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Go toolchain requirement raised to 1.26.10** (from 1.25.10) in every module's `go.mod`, to clear the standard-library vulnerabilities `govulncheck` reports on Go 1.25.10. Consumers must build with Go 1.26.10 or newer: a module that depends on this SDK has its own `go` directive raised to at least 1.26.10 by `go get`, and builds with `GOTOOLCHAIN=local` on an older toolchain fail. CI, release, and vulnerability-scan workflows now use Go 1.26.10
+
 ### Fixed
 
 - `healthx`: responses now carry `Content-Type: application/json`; the header was set after `WriteHeader` and dropped
