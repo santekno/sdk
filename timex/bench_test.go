@@ -25,3 +25,29 @@ func BenchmarkBusinessDaysBetween(b *testing.B) {
 		_ = timex.BusinessDaysBetween(from, to)
 	}
 }
+
+func BenchmarkNewUmmAlQura(b *testing.B) {
+	opt := timex.WithHijriMonthOffsets(timex.HijriMonthOffset{Year: 1446, Month: 10, Days: 1})
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := timex.NewUmmAlQura(opt); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkFromCivilDate(b *testing.B) {
+	cal, err := timex.NewUmmAlQura()
+	if err != nil {
+		b.Fatal(err)
+	}
+	t := time.Date(2026, 10, 28, 19, 0, 0, 0, timex.Jakarta)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := cal.FromCivilDate(t, timex.Jakarta); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
