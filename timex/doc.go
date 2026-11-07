@@ -6,6 +6,7 @@
 //   - Indonesian public holiday calendar
 //   - Business-day computation excluding weekends and holidays
 //   - Gregorian to Hijri conversion with the Umm al-Qura calendar
+//   - ISO 8601 duration parsing (PnDTnHnMnS subset) for values such as YouTube's contentDetails.duration
 //
 // # Quick start
 //

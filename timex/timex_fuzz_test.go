@@ -81,3 +81,21 @@ func FuzzNewUmmAlQuraOffsets(f *testing.F) {
 		}
 	})
 }
+
+func FuzzParseISODuration(f *testing.F) {
+	for _, s := range []string{"PT1H2M3S", "P1DT2H", "P0D", "PT0.5S", "", "P", "PT", "P1Y", "pt1s", "PT-1S", "PT9223372036854775807S"} {
+		f.Add(s)
+	}
+	f.Fuzz(func(t *testing.T, s string) {
+		d, err := timex.ParseISODuration(s)
+		if err != nil {
+			if !errors.Is(err, timex.ErrInvalidISODuration) || d != 0 {
+				t.Fatalf("ParseISODuration(%q) = %v, %v", s, d, err)
+			}
+			return
+		}
+		if d < 0 {
+			t.Fatalf("ParseISODuration(%q) = negative %v", s, d)
+		}
+	})
+}

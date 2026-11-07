@@ -12,6 +12,7 @@
 //   - Recovery: turns panics into a 500 JSON error and logs the stack
 //   - Tracing: starts a tracex span per request named "METHOD /route/{pattern}"
 //   - JWTAuth: verifies Bearer tokens with jwtx and stores the claims in the context
+//   - ClientIP: resolves the client IP from one trusted header (or RemoteAddr) into the context
 //
 // Errors are written as JSON by an ErrorWriter. The default writes
 //
