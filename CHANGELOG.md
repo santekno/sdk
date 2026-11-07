@@ -17,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `timex.ParseISODuration` and `ErrInvalidISODuration`: parse the ISO 8601 `PnDTnHnMnS` subset (e.g. YouTube `contentDetails.duration`) into a `time.Duration`; rejects empty input, lowercase, years/months/weeks, signs, `,` fractions, fractions other than on seconds, `P`/`PT` without components, and `time.Duration` overflow
 - `timex`: Gregorian to Hijri conversion with the Umm al-Qura calendar (`NewUmmAlQura`, `WithHijriMonthOffsets`, `FromCivilDate`, `MonthLength`, `ErrHijriOutOfRange`), covering 1356-1500 H with the month table from ICU; offsets move a month's start by one day and are rejected if any month would stop being 29 or 30 days long
 - `middleware/chi`: net/http middleware for chi routers (RequestID, Logger, Recovery, Tracing, JWTAuth with ClaimsFromContext) and a pluggable JSON ErrorWriter; part of the root module, so it is versioned with every sdk tag
 - `uuidx.NewV7`: time-ordered UUID version 7 (RFC 9562)
