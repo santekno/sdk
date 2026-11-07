@@ -65,3 +65,17 @@ func ExampleUmmAlQura_MonthLength() {
 	// 30
 	// 0
 }
+
+func ExampleParseISODuration() {
+	d, err := timex.ParseISODuration("PT1H2M3S") // YouTube contentDetails.duration
+	if err != nil {
+		panic(err)
+	}
+	fmt.Println(d)
+
+	_, err = timex.ParseISODuration("P1Y")
+	fmt.Println(errors.Is(err, timex.ErrInvalidISODuration))
+	// Output:
+	// 1h2m3s
+	// true
+}
