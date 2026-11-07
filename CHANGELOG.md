@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `hashx.HMACSHA1`: HMAC-SHA-1 for protocol compatibility only (e.g. WebSub `X-Hub-Signature`); not for new designs. Verify with `ConstantTimeEqual`
 - `jwtx`: ES256 verification (`ES256Verify`, JWS `r||s` signatures)
 - `jwtx`: `ParseKeySet` builds a `StaticKeySet` from a JWKS document (EC P-256 and RSA 2048 to 8192 bits); other keys are skipped
 - `jwtx`: `JWKSClient` fetches a JWKS over HTTPS (5 second timeout, 64 KiB limit, no redirects), caches it for 10 minutes or a shorter `max-age`, refreshes at most once per 30 seconds with a single in-flight fetch, and keeps the old keys when a refresh fails, for at most 24 hours after the last successful fetch (`WithMaxStale`) before returning `ErrKeySetUnavailable`
