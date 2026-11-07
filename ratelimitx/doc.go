@@ -1,6 +1,7 @@
 // Package ratelimitx provides a fixed-window per-key rate limiter backed by
 // Redis. It is dependency-free: bring your own Redis client (e.g.
-// github.com/redis/go-redis/v9) and satisfy the [Client] interface.
+// github.com/redis/go-redis/v9) and satisfy the [Client] interface. The
+// package lives in the root sdk module, so it is versioned with every sdk tag.
 //
 // # Design
 //
@@ -43,5 +44,5 @@
 //
 // The official go-redis client doesn't directly match the [Client] interface
 // signatures (return types differ). A thin adapter is documented in the
-// example_test.go file and trivially trivial to write.
+// example_test.go file and is a few lines to write.
 package ratelimitx
