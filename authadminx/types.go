@@ -18,19 +18,30 @@ type User struct {
 	BannedUntil      *time.Time     `json:"banned_until"`
 }
 
-// InviteOptions configures Invite. Both fields are optional.
+// InviteOptions configures Invite. Only a display name can be supplied; it is
+// stored as user_metadata.name. There is intentionally no redirect URL and no
+// free-form metadata map.
 type InviteOptions struct {
-	RedirectTo string         // absolute http(s) URL the invite link lands on
-	Data       map[string]any // stored as user_metadata
+	Name string // optional, at most 100 bytes, no control characters
 }
 
-// UpdateUserParams selects the fields UpdateUser changes. Empty fields are
-// left untouched. Note that AppMetadata is merged by the server at top level.
-type UpdateUserParams struct {
-	AppMetadata  map[string]any `json:"app_metadata,omitempty"`
-	UserMetadata map[string]any `json:"user_metadata,omitempty"`
-	// BanDuration is a Go-style duration such as "720h", or "none" to lift a ban.
-	BanDuration string `json:"ban_duration,omitempty"`
+// Wire types. They are deliberately minimal: none can carry password, phone,
+// a top-level role, email_confirm, a redirect URL or a link request.
+type inviteRequest struct {
+	Email string      `json:"email"`
+	Data  *inviteData `json:"data,omitempty"`
+}
+
+type inviteData struct {
+	Name string `json:"name"`
+}
+
+type appMetadataRequest struct {
+	AppMetadata map[string]string `json:"app_metadata"`
+}
+
+type banRequest struct {
+	BanDuration string `json:"ban_duration"`
 }
 
 // ListResult is one page of users. Total is the server-reported number of

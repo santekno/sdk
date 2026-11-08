@@ -75,7 +75,7 @@ func main() {
 | `timex` | Indonesian date/time formatting, business calendar |
 | `validx` | NIK/NPWP/IDR validation and parsing |
 | `jwtx` | JWT sign/verify (HS256, HS512, RS256) |
-| `authadminx` | Supabase Auth (GoTrue) admin client: invite, list, get, update, ban, delete users |
+| `authadminx` | Supabase Auth (GoTrue) admin client: invite, list, get, set one app_metadata field, ban or unban users (narrow surface) |
 | `hashx` | Argon2id and bcrypt password hashing |
 | `cryptox` | AES-GCM, ChaCha20, RSA-OAEP, Ed25519 encryption |
 | `errx` | Structured application errors with codes |

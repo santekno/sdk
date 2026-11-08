@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -22,18 +24,21 @@ const (
 	DefaultTimeout = 5 * time.Second
 	// MaxResponseBytes is the largest response body accepted.
 	MaxResponseBytes = 1 << 20
-	// BanForever is the BanDuration used by Ban (about 100 years).
-	BanForever = "876000h"
-	// BanNone lifts a ban when used as BanDuration.
-	BanNone = "none"
 
 	maxPerPage = 1000
+	maxName    = 100
+	maxValue   = 64
+	// banForever is the ban_duration used by SetBanned(true) (about 100 years).
+	banForever = "876000h"
+	banNone    = "none"
 	userAgent  = "santekno-sdk-authadminx/1"
 )
 
 var (
 	uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
 	codeRe = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+	keyRe  = regexp.MustCompile(`^[a-z_]{1,32}$`)
+	valRe  = regexp.MustCompile(`^[a-z0-9_-]{1,64}$`)
 )
 
 // Client talks to the Auth admin API. It is safe for concurrent use.
@@ -120,25 +125,22 @@ func (c *Client) GoString() string { return c.String() }
 // Format redacts the key for every fmt verb, including %+v.
 func (c *Client) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String()) }
 
-// Invite sends an invitation email, creating the user if needed.
+// Invite sends an invitation email, creating the user if needed. The invite
+// link uses the project's configured redirect settings; no redirect_to is ever
+// sent. Only email and the optional display name are transmitted.
 func (c *Client) Invite(ctx context.Context, email string, opts InviteOptions) (*User, error) {
 	if err := validEmail(email); err != nil {
 		return nil, err
 	}
-	q := ""
-	if opts.RedirectTo != "" {
-		ru, err := url.Parse(opts.RedirectTo)
-		if err != nil || (ru.Scheme != "https" && ru.Scheme != "http") || ru.Host == "" || ru.User != nil {
-			return nil, fmt.Errorf("%w: redirect URL", ErrInvalidArgument)
-		}
-		q = "?redirect_to=" + url.QueryEscape(opts.RedirectTo)
+	if err := validName(opts.Name); err != nil {
+		return nil, err
 	}
-	body := map[string]any{"email": email}
-	if opts.Data != nil {
-		body["data"] = opts.Data
+	req := inviteRequest{Email: email}
+	if opts.Name != "" {
+		req.Data = &inviteData{Name: opts.Name}
 	}
 	var u User
-	if _, err := c.do(ctx, http.MethodPost, "/invite"+q, body, &u); err != nil {
+	if _, err := c.do(ctx, http.MethodPost, "/invite", req, &u); err != nil {
 		return nil, err
 	}
 	return &u, nil
@@ -175,36 +177,56 @@ func (c *Client) GetUser(ctx context.Context, id string) (*User, error) {
 	return &u, nil
 }
 
-// UpdateUser changes the given fields of a user and returns the result.
-func (c *Client) UpdateUser(ctx context.Context, id string, p UpdateUserParams) (*User, error) {
+// SetAppMetadataField sets one string field inside the user's app_metadata
+// object (for example key "role", value "editor"). It never touches the
+// top-level Postgres "role" claim, email, password, phone or confirmation
+// state. key must match ^[a-z_]{1,32}$ and value ^[a-z0-9_-]{1,64}$.
+// The server merges the field into the existing app_metadata.
+func (c *Client) SetAppMetadataField(ctx context.Context, id, key, value string) (*User, error) {
 	if err := validID(id); err != nil {
 		return nil, err
 	}
+	if !keyRe.MatchString(key) {
+		return nil, fmt.Errorf("%w: metadata key", ErrInvalidArgument)
+	}
+	if len(value) > maxValue || !valRe.MatchString(value) {
+		return nil, fmt.Errorf("%w: metadata value", ErrInvalidArgument)
+	}
+	return c.put(ctx, id, appMetadataRequest{AppMetadata: map[string]string{key: value}})
+}
+
+// SetBanned blocks (true) or re-allows (false) sign-in for the user. A ban does
+// not invalidate access tokens that were already issued; they stay valid until
+// they expire, so callers must revoke sessions themselves when that matters.
+func (c *Client) SetBanned(ctx context.Context, id string, banned bool) (*User, error) {
+	if err := validID(id); err != nil {
+		return nil, err
+	}
+	d := banNone
+	if banned {
+		d = banForever
+	}
+	return c.put(ctx, id, banRequest{BanDuration: d})
+}
+
+func (c *Client) put(ctx context.Context, id string, body any) (*User, error) {
 	var u User
-	if _, err := c.do(ctx, http.MethodPut, "/admin/users/"+id, p, &u); err != nil {
+	if _, err := c.do(ctx, http.MethodPut, "/admin/users/"+id, body, &u); err != nil {
 		return nil, err
 	}
 	return &u, nil
 }
 
-// Ban blocks sign-in for the user (BanForever); existing access tokens stay
-// valid until they expire.
-func (c *Client) Ban(ctx context.Context, id string) (*User, error) {
-	return c.UpdateUser(ctx, id, UpdateUserParams{BanDuration: BanForever})
-}
-
-// Unban lifts a ban.
-func (c *Client) Unban(ctx context.Context, id string) (*User, error) {
-	return c.UpdateUser(ctx, id, UpdateUserParams{BanDuration: BanNone})
-}
-
-// DeleteUser removes a user; soft keeps the row but anonymises it.
-func (c *Client) DeleteUser(ctx context.Context, id string, soft bool) error {
-	if err := validID(id); err != nil {
-		return err
+func validName(n string) error {
+	if len(n) > maxName || !utf8.ValidString(n) {
+		return fmt.Errorf("%w: name", ErrInvalidArgument)
 	}
-	_, err := c.do(ctx, http.MethodDelete, "/admin/users/"+id, map[string]bool{"should_soft_delete": soft}, nil)
-	return err
+	for _, r := range n {
+		if unicode.IsControl(r) {
+			return fmt.Errorf("%w: name", ErrInvalidArgument)
+		}
+	}
+	return nil
 }
 
 func validID(id string) error {

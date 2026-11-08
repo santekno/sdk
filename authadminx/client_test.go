@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -107,33 +108,29 @@ func TestRequests(t *testing.T) {
 		reply      string
 	}{
 		{"invite", func(c *authadminx.Client) error {
-			u, err := c.Invite(context.Background(), "a@b.co", authadminx.InviteOptions{RedirectTo: "https://x.co/p?a=b", Data: map[string]any{"n": "N"}})
+			u, err := c.Invite(context.Background(), "a@b.co", authadminx.InviteOptions{Name: "N"})
 			if err == nil && u.ID != uid {
 				err = errors.New("bad user")
 			}
 			return err
-		}, "POST", "/auth/v1/invite", "redirect_to=https%3A%2F%2Fx.co%2Fp%3Fa%3Db", `{"data":{"n":"N"},"email":"a@b.co"}`, user},
+		}, "POST", "/auth/v1/invite", "", `{"email":"a@b.co","data":{"name":"N"}}`, user},
 		{"invite plain", func(c *authadminx.Client) error {
 			_, err := c.Invite(context.Background(), "a@b.co", authadminx.InviteOptions{})
 			return err
 		}, "POST", "/auth/v1/invite", "", `{"email":"a@b.co"}`, user},
 		{"get", func(c *authadminx.Client) error { _, err := c.GetUser(context.Background(), uid); return err },
 			"GET", "/auth/v1/admin/users/" + uid, "", "", user},
-		{"update", func(c *authadminx.Client) error {
-			u, err := c.UpdateUser(context.Background(), uid, authadminx.UpdateUserParams{AppMetadata: map[string]any{"role": "editor"}})
+		{"set field", func(c *authadminx.Client) error {
+			u, err := c.SetAppMetadataField(context.Background(), uid, "role", "editor")
 			if err == nil && (u.BannedUntil == nil || u.AppMetadata["role"] != "editor") {
 				err = errors.New("bad decode")
 			}
 			return err
 		}, "PUT", "/auth/v1/admin/users/" + uid, "", `{"app_metadata":{"role":"editor"}}`, user},
-		{"ban", func(c *authadminx.Client) error { _, err := c.Ban(context.Background(), uid); return err },
+		{"ban", func(c *authadminx.Client) error { _, err := c.SetBanned(context.Background(), uid, true); return err },
 			"PUT", "/auth/v1/admin/users/" + uid, "", `{"ban_duration":"876000h"}`, user},
-		{"unban", func(c *authadminx.Client) error { _, err := c.Unban(context.Background(), uid); return err },
+		{"unban", func(c *authadminx.Client) error { _, err := c.SetBanned(context.Background(), uid, false); return err },
 			"PUT", "/auth/v1/admin/users/" + uid, "", `{"ban_duration":"none"}`, user},
-		{"delete soft", func(c *authadminx.Client) error { return c.DeleteUser(context.Background(), uid, true) },
-			"DELETE", "/auth/v1/admin/users/" + uid, "", `{"should_soft_delete":true}`, `{}`},
-		{"delete hard", func(c *authadminx.Client) error { return c.DeleteUser(context.Background(), uid, false) },
-			"DELETE", "/auth/v1/admin/users/" + uid, "", `{"should_soft_delete":false}`, `{}`},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -194,32 +191,29 @@ func TestInvalidArguments(t *testing.T) {
 		call func() error
 	}{
 		{"id not uuid", func() error { _, e := c.GetUser(ctx, "../admin"); return e }},
-		{"id update", func() error { _, e := c.UpdateUser(ctx, "1", authadminx.UpdateUserParams{}); return e }},
-		{"id delete", func() error { return c.DeleteUser(ctx, uid+"/x", false) }},
-		{"ban id", func() error { _, e := c.Ban(ctx, ""); return e }},
+		{"id set field", func() error { _, e := c.SetAppMetadataField(ctx, "1", "role", "editor"); return e }},
+		{"ban id", func() error { _, e := c.SetBanned(ctx, "", true); return e }},
+		{"key uppercase", func() error { _, e := c.SetAppMetadataField(ctx, uid, "Role", "x"); return e }},
+		{"key empty", func() error { _, e := c.SetAppMetadataField(ctx, uid, "", "x"); return e }},
+		{"key dot", func() error { _, e := c.SetAppMetadataField(ctx, uid, "a.b", "x"); return e }},
+		{"key long", func() error { _, e := c.SetAppMetadataField(ctx, uid, strings.Repeat("a", 33), "x"); return e }},
+		{"value empty", func() error { _, e := c.SetAppMetadataField(ctx, uid, "role", ""); return e }},
+		{"value space", func() error { _, e := c.SetAppMetadataField(ctx, uid, "role", "a b"); return e }},
+		{"value upper", func() error { _, e := c.SetAppMetadataField(ctx, uid, "role", "Owner"); return e }},
+		{"value long", func() error { _, e := c.SetAppMetadataField(ctx, uid, "role", strings.Repeat("a", 65)); return e }},
+		{"name control", func() error { _, e := c.Invite(ctx, "a@b.co", authadminx.InviteOptions{Name: "a\nb"}); return e }},
+		{"name long", func() error {
+			_, e := c.Invite(ctx, "a@b.co", authadminx.InviteOptions{Name: strings.Repeat("a", 101)})
+			return e
+		}},
+		{"name utf8", func() error { _, e := c.Invite(ctx, "a@b.co", authadminx.InviteOptions{Name: "\xff"}); return e }},
 		{"email empty", func() error { _, e := c.Invite(ctx, "", authadminx.InviteOptions{}); return e }},
 		{"email crlf", func() error { _, e := c.Invite(ctx, "a@b.co\r\nBcc: x@y.z", authadminx.InviteOptions{}); return e }},
 		{"email display name", func() error { _, e := c.Invite(ctx, "A <a@b.co>", authadminx.InviteOptions{}); return e }},
 		{"email long", func() error { _, e := c.Invite(ctx, long, authadminx.InviteOptions{}); return e }},
-		{"redirect js", func() error {
-			_, e := c.Invite(ctx, "a@b.co", authadminx.InviteOptions{RedirectTo: "javascript:alert(1)"})
-			return e
-		}},
-		{"redirect userinfo", func() error {
-			_, e := c.Invite(ctx, "a@b.co", authadminx.InviteOptions{RedirectTo: "https://u@x.co"})
-			return e
-		}},
-		{"redirect unparsable", func() error {
-			_, e := c.Invite(ctx, "a@b.co", authadminx.InviteOptions{RedirectTo: "://"})
-			return e
-		}},
 		{"page 0", func() error { _, e := c.ListUsers(ctx, 0, 10); return e }},
 		{"perPage 0", func() error { _, e := c.ListUsers(ctx, 1, 0); return e }},
 		{"perPage big", func() error { _, e := c.ListUsers(ctx, 1, 1001); return e }},
-		{"unmarshalable", func() error {
-			_, e := c.UpdateUser(ctx, uid, authadminx.UpdateUserParams{AppMetadata: map[string]any{"f": func() {}}})
-			return e
-		}},
 		{"nil ctx", func() error { _, e := c.GetUser(nil, uid); return e }}, //nolint:staticcheck
 	}
 	for _, tc := range tests {
@@ -283,16 +277,43 @@ func TestAPIErrors(t *testing.T) {
 }
 
 func TestRedirectNotFollowed(t *testing.T) {
-	hit := false
-	evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hit = true }))
-	defer evil.Close()
-	c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, evil.URL, http.StatusTemporaryRedirect)
-	})
-	_, err := c.GetUser(context.Background(), uid)
-	var ae *authadminx.APIError
-	if !errors.As(err, &ae) || ae.Status != 307 || hit {
-		t.Fatalf("err=%v hit=%v", err, hit)
+	calls := []struct {
+		name string
+		do   func(*authadminx.Client) error
+	}{
+		{"get", func(c *authadminx.Client) error { _, e := c.GetUser(context.Background(), uid); return e }},
+		{"invite", func(c *authadminx.Client) error {
+			_, e := c.Invite(context.Background(), "a@b.co", authadminx.InviteOptions{})
+			return e
+		}},
+		{"set field", func(c *authadminx.Client) error {
+			_, e := c.SetAppMetadataField(context.Background(), uid, "role", "editor")
+			return e
+		}},
+		{"ban", func(c *authadminx.Client) error { _, e := c.SetBanned(context.Background(), uid, true); return e }},
+	}
+	for _, tc := range calls {
+		t.Run(tc.name, func(t *testing.T) {
+			var hits atomic.Int32
+			var leaked atomic.Bool
+			evil := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				hits.Add(1)
+				if r.Header.Get("apikey") != "" || r.Header.Get("Authorization") != "" {
+					leaked.Store(true)
+				}
+			}))
+			defer evil.Close()
+			var first atomic.Int32
+			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
+				first.Add(1)
+				http.Redirect(w, r, evil.URL, http.StatusTemporaryRedirect)
+			})
+			err := tc.do(c)
+			var ae *authadminx.APIError
+			if !errors.As(err, &ae) || ae.Status != 307 || hits.Load() != 0 || leaked.Load() || first.Load() != 1 {
+				t.Fatalf("err=%v hits=%d first=%d", err, hits.Load(), first.Load())
+			}
+		})
 	}
 }
 
