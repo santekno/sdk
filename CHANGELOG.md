@@ -20,6 +20,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `authadminx`: minimal Supabase Auth (GoTrue) admin client (`Invite`, `ListUsers`, `GetUser`, `UpdateUser`, `Ban`, `Unban`, `DeleteUser`) using the service_role key. HTTPS required except loopback, 5 second default timeout, injectable `http.Client`, 1 MiB response limit, redirects not followed, user ids validated as UUIDs, typed `*APIError` with sentinels (`ErrNotFound`, `ErrConflict`, `ErrUnprocessable`, `ErrRateLimited`, `ErrUnauthorized`) whose messages never include the response body, and the key redacted from errors and every `fmt` verb. Session revocation is not included
 - `hashx.HMACSHA1`: HMAC-SHA-1 for protocol compatibility only (e.g. WebSub `X-Hub-Signature`); not for new designs. Verify with `ConstantTimeEqual`
 - `jwtx`: ES256 verification (`ES256Verify`, JWS `r||s` signatures)
 - `jwtx`: `ParseKeySet` builds a `StaticKeySet` from a JWKS document (EC P-256 and RSA 2048 to 8192 bits); other keys are skipped
