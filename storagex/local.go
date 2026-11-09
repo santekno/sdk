@@ -8,9 +8,9 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"unicode/utf8"
 )
 
@@ -64,6 +64,14 @@ func validateKey(key string) error {
 // renames it over the destination, so readers see either the previous object
 // or the complete new one, and a failed or canceled Put leaves no partial
 // object behind. Files are created with mode 0600 and directories with 0750.
+// A process killed in the middle of Put can leave a ".storagex-tmp-*" file in
+// the destination directory; it is never read as an object and can be removed.
+//
+// Filesystem errors never echo the key or a path: they carry the operation
+// and the system error text (e.g. "permission denied") and still unwrap to the
+// underlying *fs.PathError or *os.LinkError for errors.Is and errors.As. Get
+// and Delete report a missing key, a key naming a directory, and a key below
+// an existing file (ENOTDIR) with an error matching fs.ErrNotExist.
 type LocalStorage struct{ dir string }
 
 // NewLocalStorage returns a LocalStorage that stores files under dir.
@@ -75,6 +83,11 @@ func (l *LocalStorage) Put(ctx context.Context, key, _ string, r io.Reader) (str
 	if err := validateKey(key); err != nil {
 		return "", err
 	}
+	p, err := l.put(ctx, key, r)
+	return p, fsError("put", err, false)
+}
+
+func (l *LocalStorage) put(ctx context.Context, key string, r io.Reader) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -175,6 +188,14 @@ func (l *LocalStorage) Get(_ context.Context, key string) (io.ReadCloser, error)
 	if err := validateKey(key); err != nil {
 		return nil, err
 	}
+	f, err := l.open(key)
+	if err != nil {
+		return nil, fsError("get", err, true)
+	}
+	return f, nil
+}
+
+func (l *LocalStorage) open(key string) (*os.File, error) {
 	root, err := os.OpenRoot(l.dir)
 	if err != nil {
 		return nil, err
@@ -192,7 +213,7 @@ func (l *LocalStorage) Get(_ context.Context, key string) (io.ReadCloser, error)
 	}
 	if !fi.Mode().IsRegular() {
 		_ = f.Close()
-		return nil, notExist("open", l.dir, key)
+		return nil, fs.ErrNotExist
 	}
 	return f, nil
 }
@@ -203,6 +224,10 @@ func (l *LocalStorage) Delete(_ context.Context, key string) error {
 	if err := validateKey(key); err != nil {
 		return err
 	}
+	return fsError("delete", l.remove(key), true)
+}
+
+func (l *LocalStorage) remove(key string) error {
 	root, err := os.OpenRoot(l.dir)
 	if err != nil {
 		return err
@@ -214,11 +239,53 @@ func (l *LocalStorage) Delete(_ context.Context, key string) error {
 		return err
 	}
 	if fi.IsDir() {
-		return notExist("remove", l.dir, key)
+		return fs.ErrNotExist
 	}
 	return root.Remove(rel)
 }
 
-func notExist(op, dir, key string) error {
-	return &fs.PathError{Op: op, Path: path.Join(filepath.ToSlash(dir), key), Err: fs.ErrNotExist}
+// localError replaces the message of a filesystem error, whose paths contain
+// the key, with the operation and the system error text. It unwraps to the
+// original error.
+type localError struct {
+	op       string
+	err      error
+	notFound bool
+}
+
+func (e *localError) Error() string {
+	reason := "filesystem error"
+	var pe *fs.PathError
+	var le *os.LinkError
+	switch {
+	case e.notFound:
+		reason = "object not found"
+	case errors.As(e.err, &pe):
+		reason = pe.Err.Error()
+	case errors.As(e.err, &le):
+		reason = le.Err.Error()
+	}
+	return "storagex: local " + e.op + ": " + reason
+}
+
+func (e *localError) Unwrap() error { return e.err }
+
+// Is matches fs.ErrNotExist for not-found errors, including ENOTDIR.
+func (e *localError) Is(target error) bool { return e.notFound && target == fs.ErrNotExist }
+
+// fsError wraps errors that carry a path (*fs.PathError, *os.LinkError, or the
+// not-found sentinel) in a localError; other errors (the caller's reader,
+// context cancellation) are returned unchanged. With lookup, ENOTDIR counts as
+// not found.
+func fsError(op string, err error, lookup bool) error {
+	if err == nil {
+		return nil
+	}
+	var pe *fs.PathError
+	var le *os.LinkError
+	if !errors.As(err, &pe) && !errors.As(err, &le) && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	notFound := errors.Is(err, fs.ErrNotExist) || (lookup && errors.Is(err, syscall.ENOTDIR))
+	return &localError{op: op, err: err, notFound: notFound}
 }
