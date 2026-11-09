@@ -2,8 +2,10 @@ package authadminx
 
 import (
 	"encoding/json"
+	"net/http"
 	"reflect"
 	"testing"
+	"time"
 )
 
 // The request types must never be able to carry credentials, contact data,
@@ -48,5 +50,39 @@ func TestUserDoesNotExposeExtras(t *testing.T) {
 	var u User
 	if err := json.Unmarshal([]byte(`{"id":"x","phone":"123","identities":[{}]}`), &u); err != nil || u.ID != "x" {
 		t.Fatal(err)
+	}
+}
+
+func TestTimeouts(t *testing.T) {
+	if DefaultTimeout != 10*time.Second {
+		t.Fatalf("DefaultTimeout = %v, want 10s (LAJ p2-03b D5)", DefaultTimeout)
+	}
+	custom := &http.Client{Timeout: time.Minute}
+	tests := []struct {
+		name string
+		opts []Option
+		want time.Duration
+	}{
+		{"default", nil, DefaultTimeout},
+		{"with timeout", []Option{WithTimeout(3 * time.Second)}, 3 * time.Second},
+		{"non-positive keeps default", []Option{WithTimeout(0), WithTimeout(-time.Second)}, DefaultTimeout},
+		{"custom client timeout replaced", []Option{WithHTTPClient(custom)}, DefaultTimeout},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			c, err := New("https://abc.supabase.co", "k", tc.opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if c.hc.Timeout != tc.want {
+				t.Errorf("timeout = %v, want %v", c.hc.Timeout, tc.want)
+			}
+			if c.hc.CheckRedirect == nil {
+				t.Error("redirect policy not set")
+			}
+		})
+	}
+	if custom.Timeout != time.Minute || custom.CheckRedirect != nil {
+		t.Error("injected client mutated")
 	}
 }

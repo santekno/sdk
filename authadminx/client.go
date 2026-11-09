@@ -20,8 +20,8 @@ import (
 )
 
 const (
-	// DefaultTimeout is the per-request timeout of the default HTTP client.
-	DefaultTimeout = 5 * time.Second
+	// DefaultTimeout is the per-request timeout (connect, headers, and body).
+	DefaultTimeout = 10 * time.Second
 	// MaxResponseBytes is the largest response body accepted.
 	MaxResponseBytes = 1 << 20
 
@@ -53,7 +53,9 @@ type Client struct {
 type Option func(*Client)
 
 // WithHTTPClient injects the HTTP client (for tests or custom transports).
-// It is copied; its redirect policy is always overridden to not follow.
+// It is copied, never mutated. The copy's Timeout is replaced by the client
+// timeout (DefaultTimeout or WithTimeout) and its redirect policy by one that
+// never follows redirects.
 func WithHTTPClient(hc *http.Client) Option {
 	return func(c *Client) {
 		if hc != nil {
@@ -63,7 +65,8 @@ func WithHTTPClient(hc *http.Client) Option {
 	}
 }
 
-// WithTimeout sets the per-request timeout (default 5 seconds).
+// WithTimeout sets the per-request timeout (default 10 seconds). Values <= 0
+// keep the current timeout.
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) {
 		if d > 0 {
@@ -128,6 +131,11 @@ func (c *Client) Format(f fmt.State, _ rune) { _, _ = io.WriteString(f, c.String
 // Invite sends an invitation email, creating the user if needed. The invite
 // link uses the project's configured redirect settings; no redirect_to is ever
 // sent. Only email and the optional display name are transmitted.
+//
+// Supabase Auth sends a new invitation when the email belongs to a user who
+// has not confirmed yet (a re-invite), and rejects a confirmed user with 422
+// email_exists, which matches ErrEmailExists. The email rate limit answers
+// 429 over_email_send_rate_limit, which matches ErrRateLimited.
 func (c *Client) Invite(ctx context.Context, email string, opts InviteOptions) (*User, error) {
 	if err := validEmail(email); err != nil {
 		return nil, err
@@ -269,17 +277,12 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) (http
 	}
 	resp, err := c.hc.Do(req)
 	if err != nil {
-		// Drop the *url.Error wrapper: it embeds the URL. Keep ctx causes matchable.
-		var ue *url.Error
-		if errors.As(err, &ue) {
-			err = ue.Err
-		}
-		return nil, fmt.Errorf("authadminx: request failed: %w", err)
+		return nil, c.transportErr("request failed", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	data, err := io.ReadAll(io.LimitReader(resp.Body, MaxResponseBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("authadminx: read response: %w", err)
+		return nil, c.transportErr("read response", err)
 	}
 	if len(data) > MaxResponseBytes {
 		return nil, ErrResponseTooLarge
@@ -289,6 +292,9 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) (http
 			ErrorCode string `json:"error_code"`
 		}
 		_ = json.Unmarshal(data, &e)
+		if e.ErrorCode == "" {
+			e.ErrorCode = resp.Header.Get("X-Sb-Error-Code")
+		}
 		if !codeRe.MatchString(e.ErrorCode) {
 			e.ErrorCode = ""
 		}
@@ -300,6 +306,32 @@ func (c *Client) do(ctx context.Context, method, path string, in, out any) (http
 		}
 	}
 	return resp.Header, nil
+}
+
+// transportErr wraps a pre-response failure. The *url.Error layer is dropped
+// (it embeds the URL), and a cause whose text contains the key (for example a
+// custom RoundTripper echoing request headers) is replaced by a redacted copy.
+func (c *Client) transportErr(stage string, err error) error {
+	var ue *url.Error
+	if errors.As(err, &ue) && ue.Err != nil {
+		err = ue.Err
+	}
+	if msg := err.Error(); strings.Contains(msg, c.key.v) {
+		r := &redactedError{msg: strings.ReplaceAll(msg, c.key.v, "[REDACTED]")}
+		var ne interface{ Timeout() bool }
+		if errors.As(err, &ne) {
+			r.timeout = ne.Timeout()
+		}
+		switch {
+		case errors.Is(err, context.Canceled):
+			r.cause = context.Canceled
+		case errors.Is(err, context.DeadlineExceeded):
+			r.cause = context.DeadlineExceeded
+			r.timeout = true
+		}
+		err = r
+	}
+	return &transportError{stage: stage, err: err}
 }
 
 // secret holds the service role key; it redacts itself under every fmt verb.

@@ -18,9 +18,18 @@
 // or %v/%+v/%#v output; the key is only ever sent to the configured base URL
 // (redirects are not followed, a 3xx is reported as an *APIError); responses
 // are limited to 1 MiB; user ids are validated as UUIDs before they are placed
-// in a URL path; and error messages are built from the HTTP status and a
-// sanitised error code, never from the raw response body. The base URL must be
-// https, except for loopback hosts used in local development.
+// in a URL path; every request has a timeout (10 seconds by default, covering
+// connect, headers, and body); and error messages are built from the HTTP
+// status and a sanitised error code, never from the raw response body. The
+// base URL must be https, except for loopback hosts used in local development.
+//
+// Errors are typed. A non-2xx answer is an *APIError (Status, Code) matching
+// ErrUnauthorized, ErrNotFound, ErrConflict, ErrUnprocessable, ErrRateLimited,
+// or ErrEmailExists. A failure before a complete response matches ErrTransport
+// and keeps context.Canceled, context.DeadlineExceeded, and net.Error
+// matchable, without the request URL or the key. Input rejected before any
+// request matches ErrInvalidArgument; ErrResponseTooLarge and
+// ErrInvalidResponse cover oversized or undecodable success bodies.
 //
 // A ban does not invalidate access tokens that were already issued. Revoking a
 // user's sessions is not part of this client; callers must do it themselves

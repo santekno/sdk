@@ -8,10 +8,13 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -97,6 +100,24 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+// checkRequest asserts the method, URL, body, and headers the server saw.
+func checkRequest(t *testing.T, r *http.Request, method, path, rawQ, body string) {
+	t.Helper()
+	b, _ := io.ReadAll(r.Body)
+	if r.Method != method || r.URL.Path != path || r.URL.RawQuery != rawQ {
+		t.Errorf("got %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
+	}
+	if body != "" && string(b) != body {
+		t.Errorf("body %s", b)
+	}
+	if r.Header.Get("Authorization") != "Bearer "+key || r.Header.Get("apikey") != key {
+		t.Error("auth headers")
+	}
+	if !strings.HasPrefix(r.Header.Get("User-Agent"), "santekno-sdk-authadminx") {
+		t.Error("user agent")
+	}
+}
+
 func TestRequests(t *testing.T) {
 	user := `{"id":"` + uid + `","email":"a@b.co","app_metadata":{"role":"editor"},"banned_until":"2030-01-01T00:00:00Z"}`
 	tests := []struct {
@@ -135,19 +156,7 @@ func TestRequests(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
-				b, _ := io.ReadAll(r.Body)
-				if r.Method != tc.method || r.URL.Path != tc.path || r.URL.RawQuery != tc.rawQ {
-					t.Errorf("got %s %s?%s", r.Method, r.URL.Path, r.URL.RawQuery)
-				}
-				if tc.body != "" && string(b) != tc.body {
-					t.Errorf("body %s", b)
-				}
-				if r.Header.Get("Authorization") != "Bearer "+key || r.Header.Get("apikey") != key {
-					t.Error("auth headers")
-				}
-				if !strings.HasPrefix(r.Header.Get("User-Agent"), "santekno-sdk-authadminx") {
-					t.Error("user agent")
-				}
+				checkRequest(t, r, tc.method, tc.path, tc.rawQ, tc.body)
 				js(w, 200, tc.reply)
 			})
 			if err := tc.call(c); err != nil {
@@ -230,24 +239,35 @@ func TestAPIErrors(t *testing.T) {
 		name     string
 		status   int
 		body     string
-		sentinel error
+		header   string // X-Sb-Error-Code
+		sentinel []error
 		code     string
 	}{
-		{"404", 404, `{"code":404,"error_code":"user_not_found","msg":"User not found"}`, authadminx.ErrNotFound, "user_not_found"},
-		{"401", 401, `{}`, authadminx.ErrUnauthorized, ""},
-		{"403", 403, `{"error_code":"not_admin"}`, authadminx.ErrUnauthorized, "not_admin"},
-		{"409", 409, `{"error_code":"conflict"}`, authadminx.ErrConflict, "conflict"},
-		{"422", 422, `{"error_code":"email_exists","msg":"a@b.co already registered " }`, authadminx.ErrUnprocessable, "email_exists"},
-		{"429", 429, `{"error_code":"over_email_send_rate_limit"}`, authadminx.ErrRateLimited, "over_email_send_rate_limit"},
-		{"500 html", 500, `<html>secret-body</html>`, nil, ""},
-		{"unsafe code", 400, `{"error_code":"bad code\nwith newline and secret-body"}`, nil, ""},
-		{"302", 302, ``, nil, ""},
+		{"404", 404, `{"code":404,"error_code":"user_not_found","msg":"User not found"}`, "", []error{authadminx.ErrNotFound}, "user_not_found"},
+		{"401", 401, `{}`, "", []error{authadminx.ErrUnauthorized}, ""},
+		{"403", 403, `{"error_code":"not_admin"}`, "", []error{authadminx.ErrUnauthorized}, "not_admin"},
+		{"409", 409, `{"error_code":"conflict"}`, "", []error{authadminx.ErrConflict}, "conflict"},
+		{"422 email exists", 422, `{"code":422,"error_code":"email_exists","msg":"a@b.co already registered " }`, "", []error{authadminx.ErrUnprocessable, authadminx.ErrEmailExists}, "email_exists"},
+		{"422 user already exists", 422, `{"error_code":"user_already_exists","msg":"A user with this email address has already been registered"}`, "", []error{authadminx.ErrUnprocessable, authadminx.ErrEmailExists}, "user_already_exists"},
+		{"422 other code", 422, `{"error_code":"validation_failed"}`, "", []error{authadminx.ErrUnprocessable}, "validation_failed"},
+		{"code from header", 422, `{"msg":"already registered"}`, "email_exists", []error{authadminx.ErrUnprocessable, authadminx.ErrEmailExists}, "email_exists"},
+		{"body code wins over header", 404, `{"error_code":"user_not_found"}`, "email_exists", []error{authadminx.ErrNotFound}, "user_not_found"},
+		{"unsafe header code", 400, `<html>secret-body</html>`, "Bad Code secret-body", nil, ""},
+		{"429", 429, `{"error_code":"over_email_send_rate_limit"}`, "", []error{authadminx.ErrRateLimited}, "over_email_send_rate_limit"},
+		{"500 html", 500, `<html>secret-body</html>`, "", nil, ""},
+		{"unsafe code", 400, `{"error_code":"bad code\nwith newline and secret-body"}`, "", nil, ""},
+		{"302", 302, ``, "", nil, ""},
 	}
+	all := []error{authadminx.ErrNotFound, authadminx.ErrConflict, authadminx.ErrUnprocessable, authadminx.ErrRateLimited,
+		authadminx.ErrUnauthorized, authadminx.ErrEmailExists, authadminx.ErrTransport}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newClient(t, func(w http.ResponseWriter, r *http.Request) {
 				if tc.status == 302 {
 					w.Header().Set("Location", "http://evil.example/")
+				}
+				if tc.header != "" {
+					w.Header().Set("X-Sb-Error-Code", tc.header)
 				}
 				js(w, tc.status, tc.body)
 			})
@@ -256,16 +276,17 @@ func TestAPIErrors(t *testing.T) {
 			if !errors.As(err, &ae) || ae.Status != tc.status || ae.Code != tc.code {
 				t.Fatalf("got %#v", err)
 			}
-			if tc.sentinel != nil && !errors.Is(err, tc.sentinel) {
-				t.Fatalf("want sentinel %v", tc.sentinel)
-			}
-			for _, other := range []error{authadminx.ErrNotFound, authadminx.ErrConflict, authadminx.ErrUnprocessable, authadminx.ErrRateLimited, authadminx.ErrUnauthorized} {
-				if other != tc.sentinel && errors.Is(err, other) {
-					t.Fatalf("matches %v", other)
+			for _, s := range all {
+				want := false
+				for _, w := range tc.sentinel {
+					want = want || errors.Is(w, s)
+				}
+				if errors.Is(err, s) != want {
+					t.Errorf("errors.Is(%v) = %v, want %v", s, !want, want)
 				}
 			}
 			for _, leak := range []string{"secret-body", "already registered", "User not found", key} {
-				if strings.Contains(err.Error(), leak) {
+				if strings.Contains(fmt.Sprintf("%v %+v %#v", err, err, err), leak) {
 					t.Fatalf("error leaks %q: %v", leak, err)
 				}
 			}
@@ -375,16 +396,6 @@ func TestTimeoutAndContext(t *testing.T) {
 	}
 }
 
-func TestBodyReadError(t *testing.T) {
-	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(errReader{})}, nil
-	})}
-	c, _ := authadminx.New("https://abc.supabase.co", key, authadminx.WithHTTPClient(hc))
-	if _, err := c.GetUser(context.Background(), uid); err == nil {
-		t.Fatal("want error")
-	}
-}
-
 type errReader struct{}
 
 func (errReader) Read([]byte) (int, error) { return 0, errors.New("boom") }
@@ -397,7 +408,7 @@ func TestKeyNeverLeaks(t *testing.T) {
 	lg.Println(c, *c)
 	lg.Printf("%v %+v %#v", *c, *c, *c)
 	out := fmt.Sprint(c, c.String(), c.GoString())
-	b, _ := json.Marshal(c)
+	b, _ := json.Marshal(c) //nolint:staticcheck // asserts that marshalling a Client cannot expose the key
 	if strings.Contains(buf.String()+out+string(b), key) {
 		t.Fatalf("key leaked: %s", buf.String())
 	}
@@ -406,13 +417,148 @@ func TestKeyNeverLeaks(t *testing.T) {
 	}
 }
 
-func TestKeyNotInTransportError(t *testing.T) {
-	hc := &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
-		return nil, fmt.Errorf("dial failed for %s auth=%s", r.URL, r.Header.Get("Authorization")[:0])
-	})}
-	c, _ := authadminx.New("https://abc.supabase.co", key, authadminx.WithHTTPClient(hc))
-	_, err := c.GetUser(context.Background(), uid)
-	if err == nil || strings.Contains(err.Error(), key) {
-		t.Fatalf("got %v", err)
+// echoTimeout is a net.Error timeout whose text echoes request data.
+type echoTimeout struct{ msg string }
+
+func (e *echoTimeout) Error() string   { return e.msg }
+func (e *echoTimeout) Timeout() bool   { return true }
+func (e *echoTimeout) Temporary() bool { return true }
+
+func dialFails(err error) *http.Client {
+	return &http.Client{Transport: &http.Transport{
+		DialContext: func(context.Context, string, string) (net.Conn, error) { return nil, err },
+	}}
+}
+
+// assertNoLeak checks every rendering of err and of every error in its tree.
+func assertNoLeak(t *testing.T, err error, extra ...string) {
+	t.Helper()
+	var walk func(e error, depth int)
+	walk = func(e error, depth int) {
+		if e == nil {
+			return
+		}
+		for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q"} {
+			out := fmt.Sprintf(verb, e)
+			for _, bad := range append([]string{key}, extra...) {
+				if strings.Contains(out, bad) {
+					t.Errorf("depth %d %s = %q leaks %q", depth, verb, out, bad)
+				}
+			}
+		}
+		switch u := e.(type) { //nolint:errorlint // walks the error tree by hand
+		case interface{ Unwrap() error }:
+			walk(u.Unwrap(), depth+1)
+		case interface{ Unwrap() []error }:
+			for _, x := range u.Unwrap() {
+				walk(x, depth+1)
+			}
+		}
+	}
+	walk(err, 0)
+	var ue *url.Error
+	if errors.As(err, &ue) {
+		t.Errorf("errors.As(*url.Error) matched %q", ue.URL)
+	}
+}
+
+// assertTransport checks that a transport error stays typed and classifiable.
+func assertTransport(t *testing.T, err, wantIs error, netTO bool, text string) {
+	t.Helper()
+	if !errors.Is(err, authadminx.ErrTransport) {
+		t.Fatalf("errors.Is(ErrTransport) = false: %v", err)
+	}
+	var ae *authadminx.APIError
+	if errors.As(err, &ae) {
+		t.Errorf("transport error matched *APIError")
+	}
+	if wantIs != nil && !errors.Is(err, wantIs) {
+		t.Errorf("errors.Is(%v) = false: %v", wantIs, err)
+	}
+	var ne net.Error
+	if got := errors.As(err, &ne) && ne.Timeout(); got != netTO {
+		t.Errorf("net.Error Timeout = %v, want %v: %v", got, netTO, err)
+	}
+	if !strings.HasPrefix(err.Error(), "authadminx: ") || (text != "" && !strings.Contains(err.Error(), text)) {
+		t.Errorf("error = %q, want prefix authadminx: and %q", err, text)
+	}
+}
+
+func TestTransportErrors(t *testing.T) {
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer slow.Close()
+	stall := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{"id":`)
+		w.(http.Flusher).Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+	defer stall.Close()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	tests := []struct {
+		name    string
+		base    string
+		hc      *http.Client
+		timeout time.Duration
+		ctx     func() (context.Context, context.CancelFunc)
+		wantIs  error
+		netTO   bool // errors.As(net.Error).Timeout()
+		text    string
+	}{
+		{name: "dial refused", hc: dialFails(&net.OpError{Op: "dial", Net: "tcp", Err: syscall.ECONNREFUSED}), wantIs: syscall.ECONNREFUSED, text: "request failed"},
+		{name: "dns failure", hc: dialFails(&net.DNSError{Err: "no such host", Name: "abc.supabase.co", IsNotFound: true}), text: "no such host"},
+		{name: "timeout awaiting headers", base: slow.URL, timeout: 50 * time.Millisecond, wantIs: context.DeadlineExceeded, netTO: true, text: "request failed"},
+		{name: "timeout reading body", base: stall.URL, timeout: 100 * time.Millisecond, wantIs: context.DeadlineExceeded, netTO: true, text: "read response"},
+		{name: "context deadline", base: slow.URL, ctx: func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 50*time.Millisecond)
+		}, wantIs: context.DeadlineExceeded, netTO: true},
+		{name: "context canceled", base: slow.URL, ctx: func() (context.Context, context.CancelFunc) { return canceled, func() {} }, wantIs: context.Canceled},
+		{name: "body read error", hc: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: 200, Header: http.Header{}, Body: io.NopCloser(errReader{})}, nil
+		})}, text: "read response: boom"},
+		{name: "transport echoes the key", hc: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("proxy refused %s with %s / apikey=%s: %w", r.URL, r.Header.Get("Authorization"), r.Header.Get("apikey"), context.DeadlineExceeded)
+		})}, wantIs: context.DeadlineExceeded, netTO: true, text: "[REDACTED]"},
+		{name: "transport echoes the key in a net.Error", hc: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, &echoTimeout{msg: "i/o timeout, auth " + r.Header.Get("Authorization")}
+		})}, netTO: true, text: "Bearer [REDACTED]"},
+		{name: "transport echoes the key without sentinel", hc: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+			return nil, errors.New("rejected apikey " + r.Header.Get("apikey"))
+		})}, text: "rejected apikey [REDACTED]"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			base := tc.base
+			if base == "" {
+				base = "https://abc.supabase.co"
+			}
+			opts := []authadminx.Option{authadminx.WithHTTPClient(tc.hc), authadminx.WithTimeout(tc.timeout)}
+			c, err := authadminx.New(base, key, opts...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, done := context.Background(), context.CancelFunc(func() {})
+			if tc.ctx != nil {
+				ctx, done = tc.ctx()
+			}
+			defer done()
+			_, err = c.GetUser(ctx, uid)
+			extra := []string{"/auth/v1/admin/users/" + uid}
+			if strings.HasPrefix(tc.name, "transport echoes") {
+				extra = nil // the custom transport's own text may echo the URL
+			}
+			assertNoLeak(t, err, extra...)
+			assertTransport(t, err, tc.wantIs, tc.netTO, tc.text)
+		})
 	}
 }
