@@ -139,7 +139,7 @@ func TestLocalStorageRejectsInvalidKeys(t *testing.T) {
 		"\xff\xfe",
 		tmpPrefix + "x",
 		"v/" + tmpPrefix + "x",
-		strings.Repeat("k", maxKeyLen+1),
+		strings.Repeat("k", MaxKeyLen+1),
 	}
 	parent := t.TempDir()
 	dir := filepath.Join(parent, "root")
@@ -174,15 +174,15 @@ func TestLocalStorageRejectsInvalidKeys(t *testing.T) {
 
 func TestValidateKeyLength(t *testing.T) {
 	seg := strings.Repeat("k", 127) + "/"
-	key := strings.Repeat(seg, maxKeyLen/len(seg)-1)
-	key += strings.Repeat("x", maxKeyLen-len(key))
-	if len(key) != maxKeyLen {
+	key := strings.Repeat(seg, MaxKeyLen/len(seg)-1)
+	key += strings.Repeat("x", MaxKeyLen-len(key))
+	if len(key) != MaxKeyLen {
 		t.Fatalf("test key length = %d", len(key))
 	}
-	if err := validateKey(key); err != nil {
+	if err := ValidateKey(key); err != nil {
 		t.Errorf("key of %d bytes: %v", len(key), err)
 	}
-	if err := validateKey(key + "x"); !errors.Is(err, ErrInvalidKey) {
+	if err := ValidateKey(key + "x"); !errors.Is(err, ErrInvalidKey) {
 		t.Errorf("key of %d bytes: err = %v, want ErrInvalidKey", len(key)+1, err)
 	}
 }
