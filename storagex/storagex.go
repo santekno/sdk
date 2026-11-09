@@ -1,6 +1,7 @@
 // Package storagex provides a Storage abstraction for binary blobs (T016,
 // Constitution II). MemStorage is provided for tests; LocalStorage writes to the
-// local filesystem. A cloud (S3/Supabase) implementation can be added later.
+// local filesystem (see LocalStorage for the key rules). A cloud (S3/Supabase)
+// implementation can be added later.
 package storagex
 
 import (
@@ -8,8 +9,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"os"
-	"path/filepath"
 	"sync"
 )
 
@@ -62,38 +61,4 @@ func (m *MemStorage) Delete(_ context.Context, key string) error {
 	delete(m.data, key)
 	m.mu.Unlock()
 	return nil
-}
-
-// LocalStorage writes blobs to the local filesystem under a root directory.
-// Returned URLs from Put are the absolute file path.
-type LocalStorage struct{ dir string }
-
-// NewLocalStorage returns a LocalStorage that stores files under dir.
-func NewLocalStorage(dir string) *LocalStorage { return &LocalStorage{dir: dir} }
-
-// Put writes r to dir/<basename(key)> and returns the absolute path.
-func (l *LocalStorage) Put(_ context.Context, key, _ string, r io.Reader) (string, error) {
-	if err := os.MkdirAll(l.dir, 0o750); err != nil {
-		return "", err
-	}
-	dst := filepath.Join(l.dir, filepath.Base(key))
-	f, err := os.Create(dst)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-	if _, err := io.Copy(f, r); err != nil {
-		return "", err
-	}
-	return dst, nil
-}
-
-// Get opens the file stored under dir/<basename(key)>.
-func (l *LocalStorage) Get(_ context.Context, key string) (io.ReadCloser, error) {
-	return os.Open(filepath.Join(l.dir, filepath.Base(key)))
-}
-
-// Delete removes the file stored under dir/<basename(key)>.
-func (l *LocalStorage) Delete(_ context.Context, key string) error {
-	return os.Remove(filepath.Join(l.dir, filepath.Base(key)))
 }
