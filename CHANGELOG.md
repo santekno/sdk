@@ -9,10 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `messagingx`: the default HTTP client timeout is 15 seconds instead of 65. `Poll` calls `getUpdates` with `timeout=0`, so the long-poll headroom was unused. Pass `WithHTTPClient` to choose another timeout
 - **Go toolchain requirement raised to 1.26.10** (from 1.25.10) in every module's `go.mod`, to clear the standard-library vulnerabilities `govulncheck` reports on Go 1.25.10. Consumers must build with Go 1.26.10 or newer: a module that depends on this SDK has its own `go` directive raised to at least 1.26.10 by `go get`, and builds with `GOTOOLCHAIN=local` on an older toolchain fail. CI, release, and vulnerability-scan workflows now use Go 1.26.10
 
 ### Fixed
 
+- `messagingx`: errors no longer leak the Telegram bot token. The Bot API puts the token in the request path, and transport errors were returned as `*url.Error` with the full URL. Request-building, transport, and decode errors are now rewrapped as `messagingx: telegram <method>: <stage>: <cause>` without the `*url.Error` layer; a cause whose text still contains the token (for example from a custom `RoundTripper`) is replaced by a redacted copy. `errors.Is` with `context.Canceled`/`context.DeadlineExceeded` and `errors.As` with `net.Error` (`Timeout`) keep working. Behaviour change: `errors.As(err, *url.Error)` no longer matches
+- `messagingx`: an `ok: false` response reports `api error <code> <text>` (plus `retry after` when Telegram sends it). Telegram's free-text `description` is kept only for a fixed list of data-free messages (such as `Bad Request: chat not found`); any other description is replaced by the HTTP status text, because it can echo message content. A non-JSON error page is reported by its HTTP status
+- `messagingx`: `WithHTTPClient(nil)` keeps the default client instead of causing a nil-pointer panic on the first call
 - `ratelimitx` is now part of the root module instead of a nested module with no release tag, so it can be pinned with `go get github.com/santekno/sdk@vX.Y.Z` and imports as `github.com/santekno/sdk/ratelimitx` as before. The package has no external dependencies. Breaking only for anyone who required the never-tagged module `github.com/santekno/sdk/ratelimitx` at a pseudo-version: drop that `require` (and any `replace`) and depend on `github.com/santekno/sdk` instead, otherwise Go reports an ambiguous import. Added the `example_test.go` that `doc.go` already referenced
 
 - `healthx`: responses now carry `Content-Type: application/json`; the header was set after `WriteHeader` and dropped
