@@ -3,12 +3,14 @@ package storagex
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -400,5 +402,94 @@ func TestLocalStorageRootErrors(t *testing.T) {
 	}
 	if err := missing.Delete(ctx, "a"); !errors.Is(err, fs.ErrNotExist) {
 		t.Errorf("Delete with missing dir: err = %v, want fs.ErrNotExist", err)
+	}
+}
+
+const keySentinel = "SENTINELKEY9f3a"
+
+// assertNoKey checks the rendered error never contains the key.
+func assertNoKey(t *testing.T, what string, err error) {
+	t.Helper()
+	if err == nil {
+		t.Errorf("%s: want an error", what)
+		return
+	}
+	for _, verb := range []string{"%v", "%+v", "%#v", "%s", "%q"} {
+		if out := fmt.Sprintf(verb, err); strings.Contains(out, keySentinel) {
+			t.Errorf("%s: %s echoes the key: %s", what, verb, out)
+		}
+	}
+}
+
+func TestLocalStorageErrorsDoNotEchoKeys(t *testing.T) {
+	dir := t.TempDir()
+	s := NewLocalStorage(dir)
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "file", "", strings.NewReader("f")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Put(ctx, keySentinel+"/dir/obj", "", strings.NewReader("o")); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := s.Get(ctx, keySentinel+"/missing")
+	assertNoKey(t, "Get missing", err)
+	if !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Get missing: err = %v, want fs.ErrNotExist", err)
+	}
+	err = s.Delete(ctx, keySentinel+"/missing")
+	assertNoKey(t, "Delete missing", err)
+	_, err = s.Get(ctx, keySentinel+"/dir")
+	assertNoKey(t, "Get directory", err)
+	err = s.Delete(ctx, keySentinel+"/dir")
+	assertNoKey(t, "Delete directory", err)
+	_, err = s.Put(ctx, "file/"+keySentinel, "", strings.NewReader("x"))
+	assertNoKey(t, "Put under a file", err)
+	var pe *fs.PathError
+	if !errors.As(err, &pe) || errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Put under a file: err = %v, want an unwrappable *fs.PathError, not ErrNotExist", err)
+	}
+	// Get under a file (ENOTDIR) is not found but still unwraps to the errno.
+	_, err = s.Get(ctx, "file/"+keySentinel)
+	assertNoKey(t, "Get under a file", err)
+	if !errors.Is(err, fs.ErrNotExist) || !errors.Is(err, syscall.ENOTDIR) {
+		t.Errorf("Get under a file: err = %v, want fs.ErrNotExist wrapping ENOTDIR", err)
+	}
+	_, err = s.Put(ctx, keySentinel+"/dir", "", strings.NewReader("x"))
+	assertNoKey(t, "Put over a directory", err)
+	var le *os.LinkError
+	if !errors.As(err, &le) {
+		t.Errorf("Put over a directory: err = %v, want an unwrappable *os.LinkError", err)
+	}
+	if !strings.HasPrefix(err.Error(), "storagex: local put: ") {
+		t.Errorf("message = %q", err)
+	}
+
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(t.TempDir(), filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		_, err = s.Put(ctx, "link/"+keySentinel, "", strings.NewReader("x"))
+		assertNoKey(t, "Put through symlink", err)
+		_, err = s.Get(ctx, "link/"+keySentinel)
+		assertNoKey(t, "Get through symlink", err)
+	}
+	if _, err := s.Get(ctx, "file"); err != nil {
+		t.Errorf("unrelated key broken: %v", err)
+	}
+}
+
+// A path through an existing file (ENOTDIR) is a missing object.
+func TestLocalStorageNotADirectoryIsNotFound(t *testing.T) {
+	s := NewLocalStorage(t.TempDir())
+	ctx := context.Background()
+	if _, err := s.Put(ctx, "file", "", strings.NewReader("f")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Get(ctx, "file/child"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Get under a file: err = %v, want fs.ErrNotExist", err)
+	}
+	if err := s.Delete(ctx, "file/child"); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("Delete under a file: err = %v, want fs.ErrNotExist", err)
 	}
 }

@@ -450,3 +450,89 @@ func (b *barrierReader) Read(p []byte) (int, error) {
 	})
 	return b.r.Read(p)
 }
+
+func TestLocalStorageInspectorErrorsDoNotEchoKeys(t *testing.T) {
+	dir := t.TempDir()
+	s := NewLocalStorage(dir)
+	ctx := context.Background()
+	put(t, s, "file", "f")
+	put(t, s, keySentinel+"/dir/obj", "o")
+	for name, key := range map[string]string{
+		"missing":      keySentinel + "/missing",
+		"directory":    keySentinel + "/dir",
+		"below a file": "file/" + keySentinel,
+	} {
+		_, err := s.Stat(ctx, key)
+		assertNoKey(t, "Stat "+name, err)
+		if !errors.Is(err, ErrNotFound) || !errors.Is(err, fs.ErrNotExist) {
+			t.Errorf("Stat %s: err = %v, want ErrNotFound", name, err)
+		}
+		_, gerr := s.Get(ctx, key)
+		if !errors.Is(gerr, ErrNotFound) {
+			t.Errorf("Get %s: err = %v, want ErrNotFound", name, gerr)
+		}
+		if derr := s.Delete(ctx, key); !errors.Is(derr, ErrNotFound) {
+			t.Errorf("Delete %s: err = %v, want ErrNotFound", name, derr)
+		}
+	}
+	if page, err := s.List(ctx, ListOptions{Prefix: "file/" + keySentinel + "/"}); err != nil || len(page.Objects) != 0 {
+		t.Errorf("List below a file = %+v, %v", page, err)
+	}
+	if runtime.GOOS != "windows" {
+		if err := os.Symlink(t.TempDir(), filepath.Join(dir, "link")); err != nil {
+			t.Fatal(err)
+		}
+		_, err := s.List(ctx, ListOptions{Prefix: "link/" + keySentinel + "/"})
+		assertNoKey(t, "List through symlink", err)
+		_, err = s.Stat(ctx, "link/"+keySentinel)
+		assertNoKey(t, "Stat through symlink", err)
+	}
+	// ErrAlreadyExists and reader errors are not rewrapped.
+	g := NewLocalStorage(dir, WithNoOverwrite())
+	var le *localError
+	if _, err := g.Put(ctx, "file", "", strings.NewReader("x")); !errors.Is(err, ErrAlreadyExists) || errors.As(err, &le) {
+		t.Errorf("Put existing: err = %#v, want ErrAlreadyExists, not rewrapped", err)
+	}
+}
+
+func TestLocalStorageSweepTemp(t *testing.T) {
+	dir := t.TempDir()
+	s := NewLocalStorage(dir)
+	ctx := context.Background()
+	if n, err := NewLocalStorage(filepath.Join(dir, "missing")).SweepTemp(ctx, time.Hour); n != 0 || err != nil {
+		t.Errorf("SweepTemp on missing dir = %d, %v", n, err)
+	}
+	put(t, s, "v/a.webp", "a")
+	old := filepath.Join(dir, "v", tmpPrefix+"old")
+	fresh := filepath.Join(dir, tmpPrefix+"fresh")
+	for _, p := range []string{old, fresh} {
+		if err := os.WriteFile(p, []byte("partial"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	past := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(old, past, past); err != nil {
+		t.Fatal(err)
+	}
+	n, err := s.SweepTemp(ctx, time.Hour)
+	if err != nil || n != 1 {
+		t.Fatalf("SweepTemp = %d, %v, want 1", n, err)
+	}
+	if _, err := os.Stat(old); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("old temp file kept: %v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Errorf("fresh temp file removed: %v", err)
+	}
+	if got := get(t, s, "v/a.webp"); got != "a" {
+		t.Errorf("object touched: %q", got)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err := s.SweepTemp(canceled, 0); !errors.Is(err, context.Canceled) {
+		t.Errorf("SweepTemp canceled: %v", err)
+	}
+	if n, err := s.SweepTemp(ctx, 0); err != nil || n != 1 {
+		t.Errorf("SweepTemp(0) = %d, %v, want the fresh file", n, err)
+	}
+}

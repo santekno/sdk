@@ -8,10 +8,11 @@ import (
 	"io"
 	"io/fs"
 	"os"
-	"path"
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // localKey validates key and maps it to a path relative to the root. On top
@@ -40,10 +41,16 @@ func localKey(key string) (string, error) {
 // renames it over the destination (or hard-links it, with WithNoOverwrite),
 // so readers see either the previous object or the complete new one, and a
 // failed or canceled Put leaves no partial object behind. Files are created
-// with mode 0600 and directories with 0750.
+// with mode 0600 and directories with 0750. A process killed in the middle of
+// Put can leave a ".storagex-tmp-*" file in the destination directory; it is
+// never read or listed as an object, and SweepTemp removes old ones.
 //
-// Get and Delete of a missing key return an error matching both ErrNotFound
-// and fs.ErrNotExist. Stat and List report no ContentType or ETag.
+// Filesystem errors never echo the key or a path: they carry the operation
+// and the system error text (e.g. "permission denied") and still unwrap to the
+// underlying *fs.PathError or *os.LinkError. Get, Delete, and Stat report a
+// missing key, a key naming a directory, and a key below an existing file
+// (ENOTDIR) with an error matching both ErrNotFound and fs.ErrNotExist. Stat
+// and List report no ContentType or ETag.
 type LocalStorage struct {
 	dir  string
 	opts Options
@@ -61,6 +68,11 @@ func (l *LocalStorage) Put(ctx context.Context, key, _ string, r io.Reader) (str
 	if err != nil {
 		return "", err
 	}
+	p, err := l.put(ctx, rel, r)
+	return p, fsError("put", err, false)
+}
+
+func (l *LocalStorage) put(ctx context.Context, rel string, r io.Reader) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
@@ -172,25 +184,53 @@ func (c ctxReader) Read(p []byte) (int, error) {
 	return c.r.Read(p)
 }
 
-// localNotFound matches ErrNotFound and, through Unwrap, fs.ErrNotExist (the
-// v0.5.0 error). Its message omits the path.
-type localNotFound struct{ cause error }
-
-func (e *localNotFound) Error() string        { return ErrNotFound.Error() }
-func (e *localNotFound) Is(target error) bool { return target == ErrNotFound }
-func (e *localNotFound) Unwrap() error        { return e.cause }
-
-// notFound wraps err when it reports a missing file and returns it unchanged
-// otherwise.
-func notFound(err error) error {
-	if errors.Is(err, fs.ErrNotExist) {
-		return &localNotFound{cause: err}
-	}
-	return err
+// localError replaces the message of a filesystem error, whose paths contain
+// the key, with the operation and the system error text. It unwraps to the
+// original error.
+type localError struct {
+	op       string
+	err      error
+	notFound bool
 }
 
-func dirNotFound(op, dir, key string) error {
-	return &localNotFound{cause: &fs.PathError{Op: op, Path: path.Join(filepath.ToSlash(dir), key), Err: fs.ErrNotExist}}
+func (e *localError) Error() string {
+	reason := "filesystem error"
+	var pe *fs.PathError
+	var le *os.LinkError
+	switch {
+	case e.notFound:
+		reason = "object not found"
+	case errors.As(e.err, &pe):
+		reason = pe.Err.Error()
+	case errors.As(e.err, &le):
+		reason = le.Err.Error()
+	}
+	return "storagex: local " + e.op + ": " + reason
+}
+
+func (e *localError) Unwrap() error { return e.err }
+
+// Is matches ErrNotFound and fs.ErrNotExist for not-found errors, including
+// ENOTDIR.
+func (e *localError) Is(target error) bool {
+	return e.notFound && (target == ErrNotFound || target == fs.ErrNotExist)
+}
+
+// fsError wraps errors that carry a path (*fs.PathError, *os.LinkError, or
+// fs.ErrNotExist) in a localError; other errors (the caller's reader, context
+// cancellation, ErrAlreadyExists) are returned unchanged. With lookup, ENOTDIR
+// counts as not found.
+func fsError(op string, err error, lookup bool) error {
+	if err == nil {
+		return nil
+	}
+	var pe *fs.PathError
+	var le *os.LinkError
+	if !errors.As(err, &pe) && !errors.As(err, &le) && !errors.Is(err, fs.ErrNotExist) {
+		return err
+	}
+	notFound := errors.Is(err, fs.ErrNotExist) || (lookup && errors.Is(err, syscall.ENOTDIR))
+	return &localError{op: op, err: err, notFound: notFound}
 }
 
 // Get opens the file stored under dir/<key>. A missing key, or a key that
@@ -200,14 +240,22 @@ func (l *LocalStorage) Get(_ context.Context, key string) (io.ReadCloser, error)
 	if err != nil {
 		return nil, err
 	}
+	f, err := l.open(rel)
+	if err != nil {
+		return nil, fsError("get", err, true)
+	}
+	return f, nil
+}
+
+func (l *LocalStorage) open(rel string) (*os.File, error) {
 	root, err := os.OpenRoot(l.dir)
 	if err != nil {
-		return nil, notFound(err)
+		return nil, err
 	}
 	defer root.Close()
 	f, err := root.Open(rel)
 	if err != nil {
-		return nil, notFound(err)
+		return nil, err
 	}
 	fi, err := f.Stat()
 	if err != nil {
@@ -216,7 +264,7 @@ func (l *LocalStorage) Get(_ context.Context, key string) (io.ReadCloser, error)
 	}
 	if !fi.Mode().IsRegular() {
 		_ = f.Close()
-		return nil, dirNotFound("open", l.dir, key)
+		return nil, fs.ErrNotExist
 	}
 	return f, nil
 }
@@ -228,19 +276,23 @@ func (l *LocalStorage) Delete(_ context.Context, key string) error {
 	if err != nil {
 		return err
 	}
+	return fsError("delete", l.remove(rel), true)
+}
+
+func (l *LocalStorage) remove(rel string) error {
 	root, err := os.OpenRoot(l.dir)
 	if err != nil {
-		return notFound(err)
+		return err
 	}
 	defer root.Close()
 	fi, err := root.Lstat(rel)
 	if err != nil {
-		return notFound(err)
+		return err
 	}
 	if fi.IsDir() {
-		return dirNotFound("remove", l.dir, key)
+		return fs.ErrNotExist
 	}
-	return notFound(root.Remove(rel))
+	return root.Remove(rel)
 }
 
 // Stat describes the file stored under dir/<key>. A missing key, or a key that
@@ -250,19 +302,27 @@ func (l *LocalStorage) Stat(_ context.Context, key string) (ObjectInfo, error) {
 	if err != nil {
 		return ObjectInfo{}, err
 	}
+	fi, err := l.stat(rel)
+	if err != nil {
+		return ObjectInfo{}, fsError("stat", err, true)
+	}
+	return ObjectInfo{Key: key, Size: fi.Size(), LastModified: fi.ModTime().UTC()}, nil
+}
+
+func (l *LocalStorage) stat(rel string) (fs.FileInfo, error) {
 	root, err := os.OpenRoot(l.dir)
 	if err != nil {
-		return ObjectInfo{}, notFound(err)
+		return nil, err
 	}
 	defer root.Close()
 	fi, err := root.Stat(rel)
 	if err != nil {
-		return ObjectInfo{}, notFound(err)
+		return nil, err
 	}
 	if !fi.Mode().IsRegular() {
-		return ObjectInfo{}, dirNotFound("stat", l.dir, key)
+		return nil, fs.ErrNotExist
 	}
-	return ObjectInfo{Key: key, Size: fi.Size(), LastModified: fi.ModTime().UTC()}, nil
+	return fi, nil
 }
 
 // List returns one page of regular files whose key starts with opts.Prefix,
@@ -280,13 +340,13 @@ func (l *LocalStorage) List(ctx context.Context, opts ListOptions) (ListPage, er
 		return ListPage{}, nil
 	}
 	if err != nil {
-		return ListPage{}, err
+		return ListPage{}, fsError("list", err, false)
 	}
 	defer root.Close()
 
 	infos, err := walkObjects(ctx, root, opts)
 	if err != nil {
-		return ListPage{}, err
+		return ListPage{}, fsError("list", err, false)
 	}
 	sort.Slice(infos, func(i, j int) bool { return infos[i].Key < infos[j].Key })
 	var page ListPage
@@ -308,7 +368,7 @@ func walkObjects(ctx context.Context, root *os.Root, opts ListOptions) ([]Object
 	var infos []ObjectInfo
 	err := fs.WalkDir(root.FS(), start, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			if p == start && errors.Is(err, fs.ErrNotExist) {
+			if p == start && (errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)) {
 				return fs.SkipAll
 			}
 			return err
@@ -328,4 +388,41 @@ func walkObjects(ctx context.Context, root *os.Root, opts ListOptions) ([]Object
 		return nil
 	})
 	return infos, err
+}
+
+// SweepTemp removes temporary files left by Put calls that were killed more
+// than olderThan ago, anywhere under the directory, and returns how many it
+// removed. It does not follow symbolic links. Run it while no Put is older
+// than olderThan, e.g. at startup with an hour.
+func (l *LocalStorage) SweepTemp(ctx context.Context, olderThan time.Duration) (int, error) {
+	root, err := os.OpenRoot(l.dir)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fsError("sweep", err, false)
+	}
+	defer root.Close()
+	cutoff := time.Now().Add(-olderThan)
+	removed := 0
+	err = fs.WalkDir(root.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if !d.Type().IsRegular() || !strings.HasPrefix(d.Name(), tmpPrefix) {
+			return nil
+		}
+		if fi, err := d.Info(); err != nil || fi.ModTime().After(cutoff) {
+			return nil
+		}
+		if err := root.Remove(filepath.FromSlash(p)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+		removed++
+		return nil
+	})
+	return removed, fsError("sweep", err, false)
 }
