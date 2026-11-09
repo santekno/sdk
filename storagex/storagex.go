@@ -91,12 +91,26 @@ type Inspector interface {
 	List(ctx context.Context, opts ListOptions) (ListPage, error)
 }
 
+// PresignOptions describes the one upload a presigned request allows.
+type PresignOptions struct {
+	// ContentType is the exact Content-Type the client must send.
+	ContentType string
+	// ContentLength is the exact body size in bytes the client must send; it
+	// must be greater than zero. Browsers set Content-Length from the body, so
+	// pass the size the client declared and check it against your limits
+	// before presigning.
+	ContentLength int64
+	// TTL is how long the request stays valid. Backends reject values they
+	// cannot honor instead of shortening them.
+	TTL time.Duration
+}
+
 // Presigner is implemented by backends that can hand out a URL that lets a
 // client without credentials upload one object directly.
 type Presigner interface {
 	// PresignPut returns a request that uploads one object under key with
-	// exactly contentType, valid for ttl.
-	PresignPut(ctx context.Context, key, contentType string, ttl time.Duration) (PresignedRequest, error)
+	// exactly opts.ContentType and opts.ContentLength, valid for opts.TTL.
+	PresignPut(ctx context.Context, key string, opts PresignOptions) (PresignedRequest, error)
 }
 
 // PresignedRequest is a request a client can send without credentials.

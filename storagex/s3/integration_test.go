@@ -168,12 +168,16 @@ func (e *itEnv) noOverwrite(t *testing.T) {
 
 func (e *itEnv) presignedPut(t *testing.T) {
 	key := e.prefix + "presigned.jpg"
-	p, err := e.c.PresignPut(e.ctx, key, "image/jpeg", 10*time.Minute)
+	p, err := e.c.PresignPut(e.ctx, key, storagex.PresignOptions{ContentType: "image/jpeg", ContentLength: 4, TTL: 10 * time.Minute})
 	if err != nil {
 		t.Fatal(err)
 	}
-	send := func(ct string) int {
-		req, err := http.NewRequestWithContext(e.ctx, p.Method, p.URL, strings.NewReader("jpeg"))
+	send := func(ct string, body ...string) int {
+		b := "jpeg"
+		if len(body) > 0 {
+			b = body[0]
+		}
+		req, err := http.NewRequestWithContext(e.ctx, p.Method, p.URL, strings.NewReader(b))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -187,6 +191,9 @@ func (e *itEnv) presignedPut(t *testing.T) {
 	}
 	if code := send("text/html"); code < 400 {
 		t.Errorf("presigned PUT with another content type = %d, want 4xx", code)
+	}
+	if code := send("image/jpeg", "jpeg+longer"); code < 400 {
+		t.Errorf("presigned PUT with another length = %d, want 4xx", code)
 	}
 	if code := send("image/jpeg"); code != 200 {
 		t.Fatalf("presigned PUT = %d", code)

@@ -237,7 +237,7 @@ func TestPutDefaultContentTypeAndInvalidInput(t *testing.T) {
 		if err := c.Delete(ctx, key); !errors.Is(err, storagex.ErrInvalidKey) {
 			t.Errorf("Delete(%q): %v", key, err)
 		}
-		if _, err := c.PresignPut(ctx, key, "image/png", time.Minute); !errors.Is(err, storagex.ErrInvalidKey) {
+		if _, err := c.PresignPut(ctx, key, presignOpts("image/png", 1, time.Minute)); !errors.Is(err, storagex.ErrInvalidKey) {
 			t.Errorf("PresignPut(%q): %v", key, err)
 		}
 	}
@@ -506,7 +506,7 @@ func (t echoTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 func TestTransportErrorsAreRedacted(t *testing.T) {
 	_, srv := newFake(t)
 	presigner := newTestClient(t, srv)
-	presigned, err := presigner.PresignPut(context.Background(), "u/upload-target.jpg", "image/jpeg", 10*time.Minute)
+	presigned, err := presigner.PresignPut(context.Background(), "u/upload-target.jpg", presignOpts("image/jpeg", 10, 10*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -593,14 +593,21 @@ func assertRedacted(t *testing.T, err error, secrets ...string) {
 	}
 }
 
+func presignOpts(ct string, n int64, ttl time.Duration) storagex.PresignOptions {
+	return storagex.PresignOptions{ContentType: ct, ContentLength: n, TTL: ttl}
+}
+
+const presignBody = "jpeg bytes" // 10 bytes
+
 func TestPresignPutURL(t *testing.T) {
 	_, srv := newFake(t)
 	c := newTestClient(t, srv)
-	p, err := c.PresignPut(context.Background(), "u/0b5c-uuid", "image/jpeg", 10*time.Minute+500*time.Millisecond)
+	p, err := c.PresignPut(context.Background(), "u/0b5c-uuid", presignOpts("image/jpeg", 10, 10*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p.Method != http.MethodPut || !p.ExpiresAt.Equal(testTime.Add(10*time.Minute)) || p.Header.Get("Content-Type") != "image/jpeg" || len(p.Header) != 1 {
+	wantHeader := http.Header{"Content-Type": {"image/jpeg"}, "Content-Length": {"10"}}
+	if p.Method != http.MethodPut || !p.ExpiresAt.Equal(testTime.Add(10*time.Minute)) || fmt.Sprint(p.Header) != fmt.Sprint(wantHeader) {
 		t.Errorf("presigned = %v %v %v", p.Method, p.ExpiresAt, p.Header)
 	}
 	u, err := url.Parse(p.URL)
@@ -611,7 +618,7 @@ func TestPresignPutURL(t *testing.T) {
 	want := map[string]string{
 		"X-Amz-Algorithm":     "AWS4-HMAC-SHA256",
 		"X-Amz-Expires":       "600",
-		"X-Amz-SignedHeaders": "content-type;host",
+		"X-Amz-SignedHeaders": "content-length;content-type;host",
 		"X-Amz-Credential":    testAKID + "/20261109/local/s3/aws4_request",
 		"X-Amz-Date":          "20261109T100000Z",
 	}
@@ -628,10 +635,11 @@ func TestPresignPutURL(t *testing.T) {
 	}
 }
 
-// sendPresigned sends body to a presigned request as a browser would.
-func sendPresigned(t *testing.T, srv *httptest.Server, p storagex.PresignedRequest, contentType string) int {
+// sendPresigned sends body to a presigned request as a browser would: the
+// Content-Length comes from the body.
+func sendPresigned(t *testing.T, srv *httptest.Server, p storagex.PresignedRequest, contentType, body string) int {
 	t.Helper()
-	req, err := http.NewRequest(p.Method, p.URL, strings.NewReader("jpeg bytes"))
+	req, err := http.NewRequest(p.Method, p.URL, strings.NewReader(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -649,23 +657,31 @@ func sendPresigned(t *testing.T, srv *httptest.Server, p storagex.PresignedReque
 func TestPresignPutAcceptedOnlyAsSigned(t *testing.T) {
 	f, srv := newFake(t)
 	c := newTestClient(t, srv)
-	p, err := c.PresignPut(context.Background(), "u/0b5c-uuid", "image/jpeg", 10*time.Minute)
+	p, err := c.PresignPut(context.Background(), "u/0b5c-uuid", presignOpts("image/jpeg", int64(len(presignBody)), 10*time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if code := sendPresigned(t, srv, p, "image/jpeg"); code != 200 {
+	for name, body := range map[string]string{"longer": presignBody + "!", "shorter": presignBody[1:], "empty": ""} {
+		if code := sendPresigned(t, srv, p, "image/jpeg", body); code != 403 {
+			t.Errorf("%s body = %d, want 403", name, code)
+		}
+	}
+	if _, ok := f.objects["u/0b5c-uuid"]; ok {
+		t.Fatal("upload with the wrong length was stored")
+	}
+	if code := sendPresigned(t, srv, p, "image/jpeg", presignBody); code != 200 {
 		t.Fatalf("browser PUT = %d", code)
 	}
-	if o := f.objects["u/0b5c-uuid"]; string(o.body) != "jpeg bytes" || o.contentType != "image/jpeg" {
+	if o := f.objects["u/0b5c-uuid"]; string(o.body) != presignBody || o.contentType != "image/jpeg" {
 		t.Errorf("stored = %+v", o)
 	}
 	for _, ct := range []string{"text/html", ""} {
-		if code := sendPresigned(t, srv, p, ct); code != 403 {
+		if code := sendPresigned(t, srv, p, ct, presignBody); code != 403 {
 			t.Errorf("content type %q = %d, want 403", ct, code)
 		}
 	}
 	f.now = testTime.Add(10*time.Minute + time.Second)
-	if code := sendPresigned(t, srv, p, "image/jpeg"); code != 403 {
+	if code := sendPresigned(t, srv, p, "image/jpeg", presignBody); code != 403 {
 		t.Errorf("expired URL = %d, want 403", code)
 	}
 }
@@ -673,11 +689,12 @@ func TestPresignPutAcceptedOnlyAsSigned(t *testing.T) {
 func TestPresignPutNoOverwrite(t *testing.T) {
 	_, srv := newFake(t)
 	guarded := newTestClient(t, srv, storagex.WithNoOverwrite())
-	g, err := guarded.PresignPut(context.Background(), "u/0b5c-uuid", "image/png", time.Minute)
+	g, err := guarded.PresignPut(context.Background(), "u/0b5c-uuid", presignOpts("image/png", 5, time.Minute))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if g.Header.Get("If-None-Match") != "*" || !strings.Contains(g.URL, "X-Amz-SignedHeaders=content-type%3Bhost%3Bif-none-match") {
+	if g.Header.Get("If-None-Match") != "*" || g.Header.Get("Content-Length") != "5" ||
+		!strings.Contains(g.URL, "X-Amz-SignedHeaders=content-length%3Bcontent-type%3Bhost%3Bif-none-match") {
 		t.Errorf("no-overwrite presign = %v %s", g.Header, g.URL)
 	}
 }
@@ -686,21 +703,95 @@ func TestPresignPutInvalid(t *testing.T) {
 	_, srv := newFake(t)
 	c := newTestClient(t, srv)
 	ctx := context.Background()
-	for _, bad := range []struct {
-		ct  string
-		ttl time.Duration
-	}{
-		{"", time.Minute}, {"image/png\n", time.Minute}, {"image/ü", time.Minute}, {strings.Repeat("a", 300), time.Minute},
-		{"image/png", 0}, {"image/png", 999 * time.Millisecond}, {"image/png", 7*24*time.Hour + time.Second}, {"image/png", -time.Minute},
+	for _, bad := range []storagex.PresignOptions{
+		presignOpts("", 1, time.Minute), presignOpts("image/png\n", 1, time.Minute), presignOpts("image/ü", 1, time.Minute),
+		presignOpts(strings.Repeat("a", 300), 1, time.Minute),
+		presignOpts("image/png", 0, time.Minute), presignOpts("image/png", -1, time.Minute),
+		presignOpts("image/png", 1, 0), presignOpts("image/png", 1, 999*time.Millisecond), presignOpts("image/png", 1, -time.Minute),
+		presignOpts("image/png", 1, 7*24*time.Hour+time.Second),
 	} {
-		_, err := c.PresignPut(ctx, "u/k", bad.ct, bad.ttl)
+		_, err := c.PresignPut(ctx, "u/k", bad)
 		if !errors.Is(err, ErrInvalidRequest) {
-			t.Errorf("PresignPut(%q, %v): err = %v", bad.ct, bad.ttl, err)
+			t.Errorf("PresignPut(%+v): err = %v", bad, err)
 		}
 		assertRedacted(t, err, testSecret, testAKID, "u/k")
 	}
-	if _, err := c.PresignPut(ctx, "u/k", "image/png", 7*24*time.Hour); err != nil {
-		t.Errorf("7 day TTL: %v", err)
+	// The default ceiling is the SigV4 limit of 7 days.
+	if _, err := c.PresignPut(ctx, "u/k", presignOpts("image/png", 1, 7*24*time.Hour)); err != nil {
+		t.Errorf("7 day TTL with the default ceiling: %v", err)
+	}
+}
+
+func TestPresignPutMaxTTLIsEnforced(t *testing.T) {
+	_, srv := newFake(t)
+	c, err := New(Config{
+		Endpoint: srv.URL, Region: testRegion, Bucket: testBucket, AccessKeyID: testAKID, SecretAccessKey: testSecret,
+		MaxPresignTTL: 10 * time.Minute,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	for _, ttl := range []time.Duration{601 * time.Second, 600*time.Second + 500*time.Millisecond, time.Hour, 7 * 24 * time.Hour} {
+		if p, err := c.PresignPut(ctx, "u/k", presignOpts("image/png", 1, ttl)); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("TTL %v above a 600s ceiling: err = %v, expires %v (must be rejected, not clamped)", ttl, err, p.ExpiresAt)
+		}
+	}
+	p, err := c.PresignPut(ctx, "u/k", presignOpts("image/png", 1, 600*time.Second))
+	if err != nil || !strings.Contains(p.URL, "X-Amz-Expires=600&") {
+		t.Errorf("TTL at the ceiling: %v %v", p, err)
+	}
+	for _, bad := range []time.Duration{-time.Second, 500 * time.Millisecond, 7*24*time.Hour + time.Second} {
+		_, err := New(Config{Endpoint: srv.URL, Region: testRegion, Bucket: testBucket, AccessKeyID: testAKID, SecretAccessKey: testSecret, MaxPresignTTL: bad})
+		if !errors.Is(err, ErrInvalidConfig) {
+			t.Errorf("MaxPresignTTL %v: err = %v, want ErrInvalidConfig", bad, err)
+		}
+	}
+}
+
+func TestNotFoundOnlyForMissingKeys(t *testing.T) {
+	f, srv := newFake(t)
+	c := newTestClient(t, srv)
+	ctx := context.Background()
+	respond := func(code, body string) {
+		f.override = func(w http.ResponseWriter, _ *http.Request) bool {
+			w.WriteHeader(http.StatusNotFound)
+			if body != "" {
+				fmt.Fprintf(w, "<Error><Code>%s</Code></Error>", code)
+			}
+			return true
+		}
+	}
+	for _, tc := range []struct {
+		code     string
+		withBody bool
+		missing  bool
+	}{
+		{"", false, true}, {"NoSuchKey", true, true}, {"NoSuchBucket", true, false}, {"NoSuchUpload", true, false}, {"AccessDenied", true, false},
+	} {
+		body := ""
+		if tc.withBody {
+			body = "x"
+		}
+		respond(tc.code, body)
+		_, gerr := c.Get(ctx, "k")
+		derr := c.Delete(ctx, "k")
+		var se *Error
+		if tc.missing {
+			if !errors.Is(gerr, storagex.ErrNotFound) {
+				t.Errorf("Get 404 %q: err = %v, want ErrNotFound", tc.code, gerr)
+			}
+			if derr != nil {
+				t.Errorf("Delete 404 %q: err = %v, want success", tc.code, derr)
+			}
+			continue
+		}
+		if errors.Is(gerr, storagex.ErrNotFound) || !errors.As(gerr, &se) || se.StatusCode != 404 || se.Code != tc.code {
+			t.Errorf("Get 404 %q: err = %v, want a status error, not ErrNotFound", tc.code, gerr)
+		}
+		if derr == nil || errors.Is(derr, storagex.ErrNotFound) || !errors.As(derr, &se) || se.Code != tc.code {
+			t.Errorf("Delete 404 %q: err = %v, want a status error", tc.code, derr)
+		}
 	}
 }
 func TestStatHeaders(t *testing.T) {
@@ -773,18 +864,6 @@ func TestHTTPClientIsCopiedWithoutRedirects(t *testing.T) {
 }
 
 func newJSONLogger(w io.Writer) *slog.Logger { return slog.New(slog.NewJSONHandler(w, nil)) }
-
-func TestDeleteTreats404AsSuccess(t *testing.T) {
-	f, srv := newFake(t)
-	c := newTestClient(t, srv)
-	f.override = func(w http.ResponseWriter, _ *http.Request) bool {
-		s3Error(w, http.StatusNotFound, "NoSuchKey")
-		return true
-	}
-	if err := c.Delete(context.Background(), "gone"); err != nil {
-		t.Errorf("Delete on 404: %v", err)
-	}
-}
 
 func TestPutFromPipeIsSpooled(t *testing.T) {
 	f, srv := newFake(t)

@@ -73,6 +73,11 @@ type Config struct {
 	// TempDir is where Put buffers bodies of unknown length (default
 	// os.TempDir()).
 	TempDir string
+	// MaxPresignTTL is the longest TTL PresignPut accepts; longer TTLs are
+	// rejected. Zero means 7 days, the SigV4 limit and the largest value
+	// allowed. Set it to your policy (for example 10 minutes for browser
+	// uploads) so a caller bug cannot mint long-lived upload URLs.
+	MaxPresignTTL time.Duration
 }
 
 // String returns the configuration without credentials.
@@ -105,6 +110,8 @@ type Client struct {
 	opts     storagex.Options
 	tempDir  string
 	now      func() time.Time
+
+	maxPresignTTL time.Duration
 }
 
 var (
@@ -142,6 +149,12 @@ func New(cfg Config, opts ...storagex.Option) (*Client, error) {
 		opts:    storagex.NewOptions(opts...),
 		tempDir: cfg.TempDir,
 		now:     time.Now,
+		maxPresignTTL: func() time.Duration {
+			if cfg.MaxPresignTTL == 0 {
+				return maxPresignTTL
+			}
+			return cfg.MaxPresignTTL
+		}(),
 	}, nil
 }
 
@@ -164,6 +177,8 @@ func validateConfig(cfg Config) (*url.URL, error) {
 		return nil, invalidConfig("AccessKeyID", "is empty or has unsupported characters")
 	case cfg.SecretAccessKey == "":
 		return nil, invalidConfig("SecretAccessKey", "is empty")
+	case cfg.MaxPresignTTL != 0 && (cfg.MaxPresignTTL < time.Second || cfg.MaxPresignTTL > maxPresignTTL):
+		return nil, invalidConfig("MaxPresignTTL", "must be between 1s and 7 days")
 	}
 	return u, nil
 }
@@ -334,7 +349,10 @@ func (c *Client) objectURL(key string) string {
 // Put uploads r under key and returns the object URL (no credentials). A body
 // whose length cannot be determined by seeking is first copied to a temporary
 // file in Config.TempDir to compute its length and SHA-256, not buffered in
-// memory. With storagex.WithNoOverwrite the request carries
+// memory. That copy has no size limit: bound untrusted readers yourself (for
+// example with io.LimitReader). The temporary file is removed when Put
+// returns, but a process killed during Put leaves a "storagex-s3-*" file in
+// TempDir. With storagex.WithNoOverwrite the request carries
 // "If-None-Match: *" and a 412 response returns an error matching
 // storagex.ErrAlreadyExists; servers that ignore the header overwrite.
 func (c *Client) Put(ctx context.Context, key, contentType string, r io.Reader) (string, error) {
@@ -472,10 +490,18 @@ func (c *Client) Get(ctx context.Context, key string) (io.ReadCloser, error) {
 	}
 	defer resp.Body.Close()
 	defer drain(resp.Body)
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, notFoundError("get", resp)
+	e := statusError("get", resp)
+	if missingKey(e) {
+		e.sentinel, e.detail = storagex.ErrNotFound, "object not found"
 	}
-	return nil, statusError("get", resp)
+	return nil, e
+}
+
+// missingKey reports whether a status error means the object does not exist:
+// 404 with no S3 error code (HEAD, some servers) or NoSuchKey. Other 404s,
+// such as NoSuchBucket, are configuration errors and are reported as such.
+func missingKey(e *Error) bool {
+	return e.StatusCode == http.StatusNotFound && (e.Code == "" || e.Code == "NoSuchKey")
 }
 
 func notFoundError(op string, resp *http.Response) *Error {
@@ -495,12 +521,14 @@ func (c *Client) Delete(ctx context.Context, key string) error {
 	}
 	defer resp.Body.Close()
 	defer drain(resp.Body)
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusNoContent, http.StatusNotFound:
+	if resp.StatusCode == http.StatusOK || resp.StatusCode == http.StatusNoContent {
 		return nil
-	default:
-		return statusError("delete", resp)
 	}
+	e := statusError("delete", resp)
+	if missingKey(e) {
+		return nil
+	}
+	return e
 }
 
 // Stat describes the object with a HEAD request. A missing object returns an
@@ -604,28 +632,39 @@ func (c *Client) List(ctx context.Context, opts storagex.ListOptions) (storagex.
 }
 
 // PresignPut returns a PUT request for key that a client without credentials
-// can send until ExpiresAt. It signs the host and Content-Type (and
-// "If-None-Match: *" with storagex.WithNoOverwrite), so the client must send
-// exactly the headers in PresignedRequest.Header; the body is not signed
-// (UNSIGNED-PAYLOAD), so the bucket's size and MIME limits are the only
-// limits on what is uploaded. ttl must be between 1 second and 7 days. No
-// request is made; ctx is unused.
+// can send until ExpiresAt. It signs the host, Content-Type, and
+// Content-Length (and "If-None-Match: *" with storagex.WithNoOverwrite), so
+// the client must send exactly the headers in PresignedRequest.Header and a
+// body of exactly opts.ContentLength bytes; any other type or size is refused
+// by the server. The body itself is not signed (UNSIGNED-PAYLOAD), so check
+// the declared size against your limits before presigning and verify the
+// uploaded content afterwards.
+//
+// opts.ContentLength must be greater than zero, and opts.TTL at least 1
+// second and at most Config.MaxPresignTTL: longer TTLs are rejected with
+// ErrInvalidRequest, never shortened. No request is made; ctx is unused.
 //
 // The returned URL is a bearer credential: never log it (its String and
 // LogValue redact the query).
-func (c *Client) PresignPut(_ context.Context, key, contentType string, ttl time.Duration) (storagex.PresignedRequest, error) {
+func (c *Client) PresignPut(_ context.Context, key string, opts storagex.PresignOptions) (storagex.PresignedRequest, error) {
 	if err := storagex.ValidateKey(key); err != nil {
 		return storagex.PresignedRequest{}, err
 	}
-	if !validHeaderValue(contentType) {
+	switch {
+	case !validHeaderValue(opts.ContentType):
 		return storagex.PresignedRequest{}, fmt.Errorf("%w: content type", ErrInvalidRequest)
+	case opts.ContentLength <= 0:
+		return storagex.PresignedRequest{}, fmt.Errorf("%w: content length must be greater than zero", ErrInvalidRequest)
+	case opts.TTL < time.Second || opts.TTL > c.maxPresignTTL:
+		return storagex.PresignedRequest{}, fmt.Errorf("%w: ttl must be between 1s and the configured maximum", ErrInvalidRequest)
 	}
-	if ttl < time.Second || ttl > maxPresignTTL {
-		return storagex.PresignedRequest{}, fmt.Errorf("%w: ttl must be between 1s and 7 days", ErrInvalidRequest)
-	}
-	ttl = ttl.Truncate(time.Second)
+	ttl := opts.TTL.Truncate(time.Second)
 	t := c.now().UTC()
-	headers := []pair{{"Host", c.host}, {"Content-Type", contentType}}
+	headers := []pair{
+		{"Host", c.host},
+		{"Content-Length", strconv.FormatInt(opts.ContentLength, 10)},
+		{"Content-Type", opts.ContentType},
+	}
 	if c.opts.NoOverwrite {
 		headers = append(headers, pair{"If-None-Match", "*"})
 	}

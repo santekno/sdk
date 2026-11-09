@@ -92,7 +92,7 @@ func main() {
 | `apikey` | API key generation and verification |
 | `middleware/chi` | net/http middleware for chi: request ID, logging, panic recovery, tracing, JWT auth |
 | `storagex` | Blob storage interface (`Storage`, optional `Inspector`/`Presigner`) with memory and local-filesystem backends |
-| `storagex/s3` | S3-compatible backend (AWS S3, Supabase Storage, MinIO): SigV4, presigned PUT, no-overwrite, stdlib only |
+| `storagex/s3` | S3-compatible backend (AWS S3, Supabase Storage, MinIO): SigV4, presigned PUT bound to type, size, and a TTL ceiling, no-overwrite, stdlib only |
 
 ## Contributing
 

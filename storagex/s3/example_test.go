@@ -33,7 +33,11 @@ func Example() {
 		log.Print(err) // operation, status, and S3 code only
 	}
 
-	upload, err := media.PresignPut(ctx, "u/0b5c1f0e", "image/jpeg", 10*time.Minute)
+	upload, err := media.PresignPut(ctx, "u/0b5c1f0e", storagex.PresignOptions{
+		ContentType:   "image/jpeg",
+		ContentLength: 2_400_000, // the size the browser declared; any other length is refused
+		TTL:           10 * time.Minute,
+	})
 	if err != nil {
 		log.Fatal(err)
 	}
