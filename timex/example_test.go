@@ -79,3 +79,41 @@ func ExampleParseISODuration() {
 	// 1h2m3s
 	// true
 }
+
+func ExampleUmmAlQura_ToCivilDate() {
+	// 1 Rajab 1448 H, first by the table and then a day later by sighting.
+	d := timex.HijriDate{Year: 1448, Month: 7, Day: 1}
+	cal, err := timex.NewUmmAlQura()
+	if err != nil {
+		panic(err)
+	}
+	moved, err := timex.NewUmmAlQura(timex.WithHijriMonthOffsets(
+		timex.HijriMonthOffset{Year: 1448, Month: 7, Days: 1},
+	))
+	if err != nil {
+		panic(err)
+	}
+
+	for _, c := range []*timex.UmmAlQura{cal, moved} {
+		t, err := c.ToCivilDate(d, timex.Jakarta)
+		if err != nil {
+			panic(err)
+		}
+		fmt.Println(t.Format(time.DateOnly))
+	}
+	// Output:
+	// 2026-12-10
+	// 2026-12-11
+}
+
+func ExampleHijriMonthLengthError() {
+	// Moving 1 Jumadil Akhirah 1448 H a day later makes Jumadil Ula 31 days.
+	_, err := timex.NewUmmAlQura(timex.WithHijriMonthOffsets(
+		timex.HijriMonthOffset{Year: 1448, Month: 6, Days: 1},
+	))
+	var lengthErr *timex.HijriMonthLengthError
+	if errors.As(err, &lengthErr) {
+		fmt.Println(lengthErr.Month, lengthErr.Year, lengthErr.Days)
+	}
+	// Output: 5 1448 31
+}

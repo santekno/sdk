@@ -23,6 +23,27 @@ const (
 // estimated.
 var ErrHijriOutOfRange = errors.New("timex: outside the Umm al-Qura table (1356-1500 H)")
 
+// ErrInvalidHijriDate is returned by ToCivilDate when a month is not 1 to 12 or
+// a day is not between 1 and the length of its month.
+var ErrInvalidHijriDate = errors.New("timex: invalid Hijri date")
+
+// HijriMonthLengthError is returned by NewUmmAlQura when month offsets would
+// leave a month with a length other than 29 or 30 days. Its fields let callers
+// explain the rejection without parsing the message.
+type HijriMonthLengthError struct {
+	// Year is the Hijri year of the month that changed length.
+	Year int
+	// Month is the Hijri month, 1 to 12.
+	Month int
+	// Days is the length the month would have, offsets applied.
+	Days int
+}
+
+// Error implements error.
+func (e *HijriMonthLengthError) Error() string {
+	return fmt.Sprintf("timex: Hijri month offsets make month %d of %d H %d days long, want 29 or 30", e.Month, e.Year, e.Days)
+}
+
 // HijriDate is a date in the Hijri calendar.
 type HijriDate struct {
 	// Year is the Hijri year, e.g. 1448.
@@ -76,7 +97,8 @@ type UmmAlQura struct {
 //
 // It returns an error if an offset names an invalid month or a Days value other
 // than -1 or 1, if two offsets name the same month, or if any month would no
-// longer be 29 or 30 days long. Offsets for a year outside 1356-1500 H wrap
+// longer be 29 or 30 days long (a *HijriMonthLengthError naming the first such
+// month). Offsets for a year outside 1356-1500 H wrap
 // ErrHijriOutOfRange. The first and last table months can only be shifted within
 // these rules, and the end of Dzulhijjah 1500 H cannot move.
 func NewUmmAlQura(opts ...UmmAlQuraOption) (*UmmAlQura, error) {
@@ -101,7 +123,7 @@ func NewUmmAlQura(opts ...UmmAlQuraOption) (*UmmAlQura, error) {
 	for i := range ummAlQuraMonths {
 		if n := c.starts[i+1] - c.starts[i]; n != 29 && n != 30 {
 			year, month := hijriMonthAt(i)
-			return nil, fmt.Errorf("timex: Hijri month offsets make month %d of %d H %d days long, want 29 or 30", month, year, n)
+			return nil, &HijriMonthLengthError{Year: year, Month: month, Days: n}
 		}
 	}
 	return c, nil
@@ -134,6 +156,31 @@ func (c *UmmAlQura) FromCivilDate(t time.Time, loc *time.Location) (HijriDate, e
 	}
 	hijriYear, hijriMonth := hijriMonthAt(i)
 	return HijriDate{Year: hijriYear, Month: hijriMonth, Day: civil - c.starts[i] + 1}, nil
+}
+
+// ToCivilDate returns the Gregorian civil date of a Hijri date, offsets
+// applied, as 00:00 in loc. It is the inverse of FromCivilDate: for every date
+// in the table, FromCivilDate(ToCivilDate(d, loc), loc) returns d.
+//
+// A nil loc is an error rather than a default. A year outside 1356-1500 H wraps
+// ErrHijriOutOfRange; a month other than 1 to 12, or a day outside 1 to the
+// month's length, wraps ErrInvalidHijriDate.
+func (c *UmmAlQura) ToCivilDate(d HijriDate, loc *time.Location) (time.Time, error) {
+	if loc == nil {
+		return time.Time{}, errors.New("timex: ToCivilDate requires a location")
+	}
+	if d.Month < 1 || d.Month > 12 {
+		return time.Time{}, fmt.Errorf("%w: month %d is not 1 to 12", ErrInvalidHijriDate, d.Month)
+	}
+	i, ok := hijriMonthIndex(d.Year, d.Month)
+	if !ok {
+		return time.Time{}, fmt.Errorf("%w: %d H", ErrHijriOutOfRange, d.Year)
+	}
+	if n := c.starts[i+1] - c.starts[i]; d.Day < 1 || d.Day > n {
+		return time.Time{}, fmt.Errorf("%w: day %d of month %d of %d H is not 1 to %d", ErrInvalidHijriDate, d.Day, d.Month, d.Year, n)
+	}
+	year, month, day := time.Unix(int64(c.starts[i]+d.Day-1)*secondsPerDay, 0).UTC().Date()
+	return time.Date(year, month, day, 0, 0, 0, 0, loc), nil
 }
 
 // MonthLength returns the number of days in a Hijri month with offsets applied:

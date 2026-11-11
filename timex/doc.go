@@ -22,13 +22,15 @@
 // Hijri day changes at local midnight rather than at sunset. Dates outside the
 // table return ErrHijriOutOfRange. Local month sightings are applied with
 // WithHijriMonthOffsets, which rejects offsets that leave a month with other
-// than 29 or 30 days.
+// than 29 or 30 days (a *HijriMonthLengthError names the month). ToCivilDate
+// converts back from a Hijri date to its Gregorian civil date.
 //
 //	cal, err := timex.NewUmmAlQura(timex.WithHijriMonthOffsets(
 //		timex.HijriMonthOffset{Year: 1446, Month: 10, Days: 1},
 //	))
 //	h, err := cal.FromCivilDate(t, timex.Jakarta) // HijriDate{Year, Month, Day}
 //	n := cal.MonthLength(1448, 5)                 // 29 or 30, 0 outside the table
+//	d, err := cal.ToCivilDate(timex.HijriDate{Year: 1448, Month: 7, Day: 1}, timex.Jakarta)
 //
 // The table is the one in ICU, the data behind the JavaScript Intl calendar
 // "islamic-umalqura". It matches R.H. van Gent's reconstruction of the Saudi
