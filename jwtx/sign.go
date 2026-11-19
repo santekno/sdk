@@ -14,11 +14,61 @@ import (
 	"time"
 )
 
+// maxKeyIDLen bounds the "kid" header written by WithKeyID.
+const maxKeyIDLen = 64
+
+// SignOption configures SignWith.
+type SignOption func(*signConfig)
+
+type signConfig struct {
+	kid    string
+	hasKid bool
+}
+
+// WithKeyID writes kid as the "kid" header so that a verifier can select the
+// key with VerifyWithKeySet. kid must be 1 to 64 characters from
+// [A-Za-z0-9._-]; SignWith returns an error wrapping ErrTokenInvalid otherwise.
+func WithKeyID(kid string) SignOption {
+	return func(c *signConfig) { c.kid, c.hasKid = kid, true }
+}
+
+func validKeyID(kid string) bool {
+	if kid == "" || len(kid) > maxKeyIDLen {
+		return false
+	}
+	for i := 0; i < len(kid); i++ {
+		c := kid[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9',
+			c == '.', c == '_', c == '-':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 // Sign returns a serialized JWT for claims signed with key.
 func Sign(claims Claims, key Key) (string, error) {
+	return SignWith(claims, key)
+}
+
+// SignWith is Sign with options. Without options the output is identical to
+// Sign.
+func SignWith(claims Claims, key Key, opts ...SignOption) (string, error) {
+	var cfg signConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	header := map[string]string{
 		"alg": string(key.Alg),
 		"typ": "JWT",
+	}
+	if cfg.hasKid {
+		if !validKeyID(cfg.kid) {
+			return "", fmt.Errorf("%w: invalid key id", ErrTokenInvalid)
+		}
+		header["kid"] = cfg.kid
 	}
 	headerJSON, err := json.Marshal(header)
 	if err != nil {
