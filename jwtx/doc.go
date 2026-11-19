@@ -5,6 +5,11 @@
 //	tok, _ := jwtx.Sign(jwtx.Claims{Subject: "u-42"}, jwtx.HS256([]byte("secret")))
 //	claims, err := jwtx.Verify(tok, jwtx.HS256([]byte("secret")))
 //
+// SignWith adds options; WithKeyID writes a "kid" header (1 to 64 characters
+// from [A-Za-z0-9._-]) so that VerifyWithKeySet can select the key.
+//
+//	tok, err := jwtx.SignWith(claims, key, jwtx.WithKeyID("2026-11"))
+//
 // Tokens issued by a third party are verified against its published JWKS with
 // VerifyWithKeySet, which is stricter than Verify. See its documentation.
 //
